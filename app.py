@@ -447,7 +447,7 @@ if st.session_state.get('is_admin', False):
         
         # 导出数据
         if st.sidebar.button("📤 导出所有数据（JSON）"):
-            json_str = json.dumps(data['submissions'], ensure_ascii=False, indent=2)https://github.com/TairanRyanTang/CreativeNonfiction/blob/main/app.py
+            json_str = json.dumps(data['submissions'], ensure_ascii=False, indent=2)
             st.sidebar.download_button(
                 label="下载JSON文件",
                 data=json_str,
