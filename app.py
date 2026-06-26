@@ -33,7 +33,7 @@ ALLOWED_EXTENSIONS = {'doc', 'docx'}
 UPLOAD_DIR = 'uploads'
 DATA_FILE = 'data.json'
 VIRUS_SCAN_DIR = 'virus_quarantine'
-ADMIN_PASSWORD_HASH = '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'  # 默认 "password"
+ADMIN_PASSWORD_HASH = '78d34f89d28f7278476ddb7e382f37535e2eca35a5b0ffc7c84df20f7dcdd789'
 
 GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
 
