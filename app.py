@@ -5,7 +5,6 @@ import json
 import hashlib
 import zipfile
 import io
-import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -16,12 +15,9 @@ ALLOWED_EXTENSIONS = {'doc', 'docx'}
 UPLOAD_DIR = 'uploads'
 DATA_FILE = 'data.json'
 VIRUS_SCAN_DIR = 'virus_quarantine'
-ADMIN_PASSWORD_HASH = '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'  # 默认 "password"
 
-GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
+ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "password")
+ADMIN_PASSWORD_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
 # ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
