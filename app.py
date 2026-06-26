@@ -1,3 +1,20 @@
+import subprocess
+import sys
+
+# 自动安装缺失的依赖
+def install_missing_packages():
+    """检查并安装 python-docx"""
+    try:
+        import docx
+    except ImportError:
+        print("📦 正在安装 python-docx...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "python-docx==1.1.2"
+        ])
+        print("✅ python-docx 安装完成")
+
+install_missing_packages()
+
 import streamlit as st
 import pandas as pd
 import os
