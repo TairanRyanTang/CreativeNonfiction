@@ -5,24 +5,21 @@ import json
 import hashlib
 import re
 import zipfile
-import magic  # 需要安装：pip install python-magic-bin (Windows) 或 python-magic (Linux/Mac)
+import io
+import mimetypes
 from datetime import datetime
 from pathlib import Path
 
 # ---------- 安全配置 ----------
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB（Word文档通常不会太大）
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 # 只允许Word文档
 ALLOWED_EXTENSIONS = {'doc', 'docx'}
-ALLOWED_MIME_TYPES = {
-    'application/msword',  # .doc
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'  # .docx
-}
 
 UPLOAD_DIR = 'uploads'
 DATA_FILE = 'data.json'
-VIRUS_SCAN_DIR = 'virus_quarantine'  # 隔离区
-ADMIN_PASSWORD_HASH = '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'
+VIRUS_SCAN_DIR = 'virus_quarantine'
+ADMIN_PASSWORD_HASH = '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'  # "password"
 
 # 班级列表
 CLASS_LIST = [
@@ -35,47 +32,10 @@ CLASS_LIST = [
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
-# ---------- 病毒检测函数 ----------
-def detect_macro_virus(file_content):
-    """
-    检测Word文档中的宏病毒
-    原理：检查docx文件中的vbaProject.bin或宏相关文件
-    """
-    try:
-        # 检查是否为docx (zip格式)
-        if file_content[:4] == b'PK\x03\x04':  # ZIP文件头
-            import io
-            with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
-                for name in zf.namelist():
-                    # 检测宏文件
-                    if any(x in name.lower() for x in [
-                        'vba', 'macro', 'vbaproject', 
-                        '_rels/vba', 'word/vba'
-                    ]):
-                        return True, f"检测到宏文件：{name}"
-        return False, None
-    except Exception as e:
-        # 如果解压失败，可能是损坏文件或病毒伪装
-        return True, f"文件结构异常：{str(e)[:50]}"
-
-def detect_embedded_objects(file_content):
-    """
-    检测嵌入的OLE对象（可能包含恶意代码）
-    """
-    # 检测OLE对象头
-    ole_signatures = [
-        b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1',  # OLE Compound File
-        b'ObjectPool',  # 对象池
-        b'Embedded',    # 嵌入对象
-    ]
-    for sig in ole_signatures:
-        if sig in file_content:
-            return True, f"检测到嵌入对象（OLE）"
-    return False, None
-
+# ---------- 病毒检测函数（纯Python实现） ----------
 def scan_word_document(file_content, filename):
     """
-    综合病毒扫描
+    综合病毒扫描（纯Python实现，无外部依赖）
     """
     errors = []
     
@@ -87,37 +47,86 @@ def scan_word_document(file_content, filename):
     elif filename.lower().endswith('.doc'):
         # doc应该是OLE格式
         ole_header = b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'
-        if file_content[:8] != ole_header:
+        if len(file_content) < 8 or file_content[:8] != ole_header:
             errors.append("无效的doc文件格式")
+    else:
+        errors.append("不支持的文件格式，请上传 .doc 或 .docx")
+        return errors
     
-    # 2. 宏病毒检测
-    has_macro, macro_detail = detect_macro_virus(file_content)
-    if has_macro:
-        errors.append(f"检测到宏病毒：{macro_detail}")
+    # 2. 检测宏病毒（检查docx中的宏文件）
+    if filename.lower().endswith('.docx'):
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
+                for name in zf.namelist():
+                    # 检测宏相关文件
+                    macro_patterns = [
+                        'vba', 'macro', 'vbaproject', 
+                        '_rels/vba', 'word/vba', 'bin/',
+                        'vbaData.xml', 'vbaProject.bin'
+                    ]
+                    name_lower = name.lower()
+                    if any(pattern in name_lower for pattern in macro_patterns):
+                        errors.append(f"检测到宏文件：{name}")
+                        break
+        except zipfile.BadZipFile:
+            errors.append("docx文件损坏或格式异常")
+        except Exception as e:
+            errors.append(f"文件解析异常：{str(e)[:50]}")
     
-    # 3. 嵌入式对象检测
-    has_ole, ole_detail = detect_embedded_objects(file_content)
-    if has_ole:
-        errors.append(f"检测到危险嵌入对象：{ole_detail}")
+    # 3. 检测嵌入的OLE对象
+    ole_signatures = [
+        b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1',  # OLE Compound File
+        b'ObjectPool',  # 对象池
+        b'Embedded',    # 嵌入对象
+        b'objclass',    # OLE类信息
+    ]
+    for sig in ole_signatures:
+        if sig in file_content:
+            errors.append("检测到嵌入对象（OLE），可能存在风险")
+            break
     
-    # 4. 文件大小异常检测（过小可能是空的，过大可能有隐藏内容）
+    # 4. 文件大小异常检测
     if len(file_content) < 1024:  # 小于1KB
         errors.append("文件过小，可能为空文档或损坏")
     
-    # 5. 检测可执行代码特征
+    if len(file_content) > 50 * 1024 * 1024:  # 大于50MB
+        errors.append("文件过大，超过50MB限制")
+    
+    # 5. 检测可执行代码特征（增强版）
     executable_patterns = [
         b'CreateObject', b'WScript.Shell', b'Shell.Application',
         b'Run(', b'Exec(', b'System.', b'Process.Start',
-        b'<script', b'javascript:', b'vbscript:'
+        b'<script', b'javascript:', b'vbscript:',
+        b'eval(', b'execute(', b'ActiveXObject',
+        b'GetObject(', b'CreateObject(',
+        b'MSXML2.XMLHTTP', b'WinHttp.WinHttpRequest',
     ]
+    
+    # 将内容转为小写进行比较（忽略大小写）
+    content_lower = file_content.lower()
     for pattern in executable_patterns:
-        if pattern.lower() in file_content.lower():
+        if pattern.lower() in content_lower:
             errors.append(f"检测到可疑代码特征：{pattern.decode('utf-8', errors='ignore')}")
+            break
+    
+    # 6. 检测危险文件头伪装
+    dangerous_headers = [
+        b'MZ',  # EXE文件头
+        b'%PDF',  # PDF（不是Word）
+    ]
+    
+    # 检查前100个字节
+    header_check = file_content[:100]
+    for header in dangerous_headers:
+        if header in header_check:
+            # 如果是docx，允许zip头
+            if filename.lower().endswith('.docx') and header == b'PK\x03\x04':
+                continue
+            errors.append(f"检测到异常文件特征，可能为伪装文件")
             break
     
     return errors
 
-# ---------- 文件保存函数（带病毒隔离） ----------
 def save_uploaded_file(file_content, filename, user_id):
     """
     保存文件，如果检测到病毒则隔离
@@ -140,7 +149,10 @@ def save_uploaded_file(file_content, filename, user_id):
     file_path = os.path.join(UPLOAD_DIR, safe_name)
     with open(file_path, 'wb') as f:
         f.write(file_content)
-    os.chmod(file_path, 0o444)  # 只读
+    try:
+        os.chmod(file_path, 0o444)  # 只读
+    except:
+        pass  # Streamlit Cloud可能不支持chmod
     return file_path, True, []
 
 def safe_filename(original_name, user_id):
@@ -197,6 +209,8 @@ if 'user_id' not in st.session_state:
     st.session_state.user_id = None
 if 'login_attempts' not in st.session_state:
     st.session_state.login_attempts = 0
+if 'is_admin' not in st.session_state:
+    st.session_state.is_admin = False
 
 # ---------- 登录/注册模块 ----------
 if st.session_state.user_id is None:
@@ -363,7 +377,10 @@ if submitted:
             file_path = os.path.join(UPLOAD_DIR, safe_name)
             with open(file_path, 'wb') as f:
                 f.write(file_content)
-            os.chmod(file_path, 0o444)
+            try:
+                os.chmod(file_path, 0o444)
+            except:
+                pass
             
             # 保存数据
             data['submissions'].append({
@@ -385,7 +402,7 @@ if submitted:
             
             # 显示提交确认
             st.info("📌 你的作品已安全保存，不可修改或重复提交")
-            st.redirect(st.page_redirect)  # 刷新页面
+            st.rerun()
             
         except Exception as e:
             log_activity('submit_error', user_key, str(e))
@@ -408,7 +425,10 @@ if st.session_state.get('is_admin', False):
     st.sidebar.divider()
     st.sidebar.subheader(f"📊 统计数据")
     st.sidebar.metric("总参赛人数", len(data['submissions']))
-    st.sidebar.metric("隔离文件数", len(os.listdir(VIRUS_SCAN_DIR)) if os.path.exists(VIRUS_SCAN_DIR) else 0)
+    
+    # 计算隔离文件数
+    virus_count = len(os.listdir(VIRUS_SCAN_DIR)) if os.path.exists(VIRUS_SCAN_DIR) else 0
+    st.sidebar.metric("隔离文件数", virus_count)
     
     if data['submissions']:
         df = pd.DataFrame(data['submissions'])
@@ -427,7 +447,7 @@ if st.session_state.get('is_admin', False):
         
         # 导出数据
         if st.sidebar.button("📤 导出所有数据（JSON）"):
-            json_str = json.dumps(data['submissions'], ensure_ascii=False, indent=2)
+            json_str = json.dumps(data['submissions'], ensure_ascii=False, indent=2)https://github.com/TairanRyanTang/CreativeNonfiction/blob/main/app.py
             st.sidebar.download_button(
                 label="下载JSON文件",
                 data=json_str,
