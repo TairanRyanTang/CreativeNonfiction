@@ -248,7 +248,7 @@ if st.session_state.user_id is None:
         else:
             user_key = get_user_key(selected_grade, student_name)
             
-            # 不再检查是否已提交，允许覆盖
+            # 允许覆盖旧作品，不阻止登录
             st.session_state.user_id = user_key
             st.session_state.user_grade = selected_grade
             st.session_state.user_name = student_name
@@ -261,7 +261,7 @@ if st.session_state.user_id is None:
 # ---------- 已登录状态 ----------
 st.success(f"✅ 当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
-# ---------- 检查是否有旧作品（仅提示，不阻止提交） ----------
+# ---------- 检查是否有旧作品（仅提示） ----------
 data = load_data()
 user_key = st.session_state.user_id
 user_submission = None
@@ -340,7 +340,7 @@ if submitted:
                 st.error(f"❌ {err}")
     else:
         try:
-            # 查找并删除旧作品（如果存在）
+            # 删除旧作品（若存在）
             data = load_data()  # 重新读取最新数据
             for idx, s in enumerate(data['submissions']):
                 if s['user_key'] == user_key:
@@ -364,7 +364,7 @@ if submitted:
             # 添加新记录
             data['submissions'].append({
                 'user_key': user_key,
-                'class_name': st.session_state.user_grade,  # 字段名保留兼容性，实际存年级
+                'class_name': st.session_state.user_grade,
                 'student_name': st.session_state.user_name,
                 'work_title': work_title,
                 'work_desc': work_desc,
@@ -422,6 +422,27 @@ if st.session_state.get('is_admin', False):
                     st.sidebar.text(f"🔴 {vf}")
             else:
                 st.sidebar.success("✅ 无隔离文件")
+    
+    # ---------- 一键删除所有作品 ----------
+    st.sidebar.divider()
+    st.sidebar.error("🧹 危险操作区")
+    confirm_delete = st.sidebar.checkbox("⚠️ 我确认要删除所有作品及文件，此操作不可恢复")
+    if st.sidebar.button("一键删除所有作品", disabled=not confirm_delete):
+        if confirm_delete:
+            # 删除所有上传文件
+            if os.path.exists(UPLOAD_DIR):
+                for file in os.listdir(UPLOAD_DIR):
+                    file_path = os.path.join(UPLOAD_DIR, file)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        st.sidebar.error(f"删除文件失败：{file} - {e}")
+            # 清空提交记录
+            data['submissions'] = []
+            save_data(data)
+            log_activity('admin_delete_all', 'admin', 'All submissions and files deleted')
+            st.sidebar.success("✅ 所有作品及文件已删除")
+            st.rerun()
     
     if st.sidebar.button("🚪 退出管理"):
         st.session_state.is_admin = False
