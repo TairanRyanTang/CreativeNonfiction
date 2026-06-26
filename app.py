@@ -3,25 +3,19 @@ import pandas as pd
 import os
 import json
 import hashlib
-import re
 import zipfile
 import io
-import mimetypes
 from datetime import datetime
-from pathlib import Path
 
 # ---------- 安全配置 ----------
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
-
-# 只允许Word文档
 ALLOWED_EXTENSIONS = {'doc', 'docx'}
 
 UPLOAD_DIR = 'uploads'
 DATA_FILE = 'data.json'
 VIRUS_SCAN_DIR = 'virus_quarantine'
-ADMIN_PASSWORD_HASH = '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'  # "password"
+ADMIN_PASSWORD_HASH = '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8'  # 默认密码 "password"
 
-# 年级列表（原班级）
 GRADE_LIST = [
     'Grade 2027',
     'Grade 2028',
@@ -32,14 +26,9 @@ GRADE_LIST = [
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
-# ---------- 病毒检测函数（纯Python实现） ----------
+# ---------- 病毒检测函数 ----------
 def scan_word_document(file_content, filename):
-    """
-    综合病毒扫描（纯Python实现，无外部依赖）
-    """
     errors = []
-    
-    # 1. 文件头校验（魔数检测）
     if filename.lower().endswith('.docx'):
         if file_content[:4] != b'PK\x03\x04':
             errors.append("无效的docx文件格式")
@@ -50,14 +39,13 @@ def scan_word_document(file_content, filename):
     else:
         errors.append("不支持的文件格式，请上传 .doc 或 .docx")
         return errors
-    
-    # 2. 检测宏病毒
+
     if filename.lower().endswith('.docx'):
         try:
             with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
                 for name in zf.namelist():
                     macro_patterns = [
-                        'vba', 'macro', 'vbaproject', 
+                        'vba', 'macro', 'vbaproject',
                         '_rels/vba', 'word/vba', 'bin/',
                         'vbaData.xml', 'vbaProject.bin'
                     ]
@@ -69,27 +57,21 @@ def scan_word_document(file_content, filename):
             errors.append("docx文件损坏或格式异常")
         except Exception as e:
             errors.append(f"文件解析异常：{str(e)[:50]}")
-    
-    # 3. 检测嵌入的OLE对象
+
     ole_signatures = [
         b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1',
-        b'ObjectPool',
-        b'Embedded',
-        b'objclass',
+        b'ObjectPool', b'Embedded', b'objclass',
     ]
     for sig in ole_signatures:
         if sig in file_content:
             errors.append("检测到嵌入对象（OLE），可能存在风险")
             break
-    
-    # 4. 文件大小异常检测
+
     if len(file_content) < 1024:
         errors.append("文件过小，可能为空文档或损坏")
-    
     if len(file_content) > 50 * 1024 * 1024:
         errors.append("文件过大，超过50MB限制")
-    
-    # 5. 检测可执行代码特征
+
     executable_patterns = [
         b'CreateObject', b'WScript.Shell', b'Shell.Application',
         b'Run(', b'Exec(', b'System.', b'Process.Start',
@@ -98,19 +80,13 @@ def scan_word_document(file_content, filename):
         b'GetObject(', b'CreateObject(',
         b'MSXML2.XMLHTTP', b'WinHttp.WinHttpRequest',
     ]
-    
     content_lower = file_content.lower()
     for pattern in executable_patterns:
         if pattern.lower() in content_lower:
             errors.append(f"检测到可疑代码特征：{pattern.decode('utf-8', errors='ignore')}")
             break
-    
-    # 6. 检测危险文件头伪装
-    dangerous_headers = [
-        b'MZ',  # EXE文件头
-        b'%PDF',  # PDF
-    ]
-    
+
+    dangerous_headers = [b'MZ', b'%PDF']
     header_check = file_content[:100]
     for header in dangerous_headers:
         if header in header_check:
@@ -118,30 +94,7 @@ def scan_word_document(file_content, filename):
                 continue
             errors.append("检测到异常文件特征，可能为伪装文件")
             break
-    
     return errors
-
-def save_uploaded_file(file_content, filename, user_id):
-    """保存文件，若检测到病毒则隔离"""
-    scan_errors = scan_word_document(file_content, filename)
-    
-    if scan_errors:
-        quarantine_name = f"{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-        quarantine_path = os.path.join(VIRUS_SCAN_DIR, quarantine_name)
-        with open(quarantine_path, 'wb') as f:
-            f.write(file_content)
-        log_activity('virus_quarantine', user_id, f"{filename} - {', '.join(scan_errors)}")
-        return None, False, scan_errors
-    
-    safe_name = safe_filename(filename, user_id)
-    file_path = os.path.join(UPLOAD_DIR, safe_name)
-    with open(file_path, 'wb') as f:
-        f.write(file_content)
-    try:
-        os.chmod(file_path, 0o444)
-    except:
-        pass
-    return file_path, True, []
 
 def safe_filename(original_name, user_id):
     ext = original_name.rsplit('.', 1)[-1].lower() if '.' in original_name else ''
@@ -184,14 +137,13 @@ def log_activity(action, user_id, detail=""):
         f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
 
 def get_user_key(grade, student_name):
-    """生成用户唯一标识"""
     return f"{grade}_{student_name}".strip()
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="比赛作品提交系统", page_icon="🔒")
 st.title("📝 比赛作品提交系统")
 
-# ---------- 管理员登录（放在首页顶部） ----------
+# ---------- 管理员登录 ----------
 with st.expander("🔐 管理员登录"):
     admin_pass = st.text_input("管理员密码", type="password", key="admin_pass_main")
     if st.button("验证身份", key="admin_login_main"):
@@ -207,32 +159,22 @@ with st.expander("🔐 管理员登录"):
 # ---------- 会话初始化 ----------
 if 'user_id' not in st.session_state:
     st.session_state.user_id = None
-if 'login_attempts' not in st.session_state:
-    st.session_state.login_attempts = 0
 if 'is_admin' not in st.session_state:
     st.session_state.is_admin = False
 
-# ---------- 用户登录/注册模块 ----------
+# ---------- 用户登录/注册 ----------
 if st.session_state.user_id is None:
     st.subheader("👤 登录 / 注册")
     st.caption("请选择你的年级并输入姓名，系统将自动识别你是新用户还是老用户")
-    
     col1, col2 = st.columns(2)
     with col1:
         selected_grade = st.selectbox("选择年级", GRADE_LIST)
     with col2:
         student_name = st.text_input("真实姓名", max_chars=20, placeholder="张三")
-    
     use_custom_grade = st.checkbox("如果上面没有你的年级，点这里输入")
     if use_custom_grade:
         selected_grade = st.text_input("手动输入年级", placeholder="例如：Grade 2027")
-    
-    col3, col4 = st.columns([3, 1])
-    with col3:
-        agree = st.checkbox("我承诺提交的作品为本人原创")
-    with col4:
-        st.write("")
-    
+    agree = st.checkbox("我承诺提交的作品为本人原创")
     if st.button("登录 / 注册", type="primary"):
         errors = []
         if not selected_grade:
@@ -241,27 +183,23 @@ if st.session_state.user_id is None:
             errors.append("请输入姓名")
         if not agree:
             errors.append("请勾选原创承诺")
-        
         if errors:
             for err in errors:
                 st.error(f"❌ {err}")
         else:
             user_key = get_user_key(selected_grade, student_name)
-            
-            # 允许覆盖旧作品，不阻止登录
             st.session_state.user_id = user_key
             st.session_state.user_grade = selected_grade
             st.session_state.user_name = student_name
             log_activity('login_success', user_key)
             st.success(f"✅ 欢迎，{selected_grade} {student_name}！")
             st.rerun()
-    
     st.stop()
 
 # ---------- 已登录状态 ----------
 st.success(f"✅ 当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
-# ---------- 检查是否有旧作品（仅提示） ----------
+# ---------- 检查旧作品 ----------
 data = load_data()
 user_key = st.session_state.user_id
 user_submission = None
@@ -282,46 +220,38 @@ if user_submission:
             file_size = os.path.getsize(user_submission['file_path']) / 1024 / 1024
             st.write(f"**附件**：{os.path.basename(user_submission['file_path'])} ({file_size:.2f} MB)")
 
-# ---------- 作品提交表单 ----------
+# ---------- 提交表单 ----------
 st.subheader("📤 提交你的Word文档作品")
 st.caption("⚠️ 仅接受 .doc 或 .docx 格式，文件大小不超过20MB")
-st.caption("🔒 系统会自动扫描宏病毒和恶意代码，请确保文档安全")
 
 with st.form("submit_form"):
     st.text_input("年级", value=st.session_state.user_grade, disabled=True)
     st.text_input("姓名", value=st.session_state.user_name, disabled=True)
-    
     work_title = st.text_input("作品名称", max_chars=100, placeholder="《我的参赛作品》")
     work_desc = st.text_area("作品简介", max_chars=500, placeholder="请简要描述你的作品内容...")
-    
     uploaded_file = st.file_uploader(
         "📎 上传Word文档（仅支持 .doc / .docx）",
         type=['doc', 'docx'],
         accept_multiple_files=False
     )
-    
     if uploaded_file is not None:
         file_size = uploaded_file.size
         if file_size > MAX_FILE_SIZE:
-            st.error(f"❌ 文件大小 {file_size/1024/1024:.1f}MB 超过限制（{MAX_FILE_SIZE/1024/1024}MB）")
+            st.error(f"❌ 文件大小 {file_size/1024/1024:.1f}MB 超过限制")
         else:
             st.success(f"✅ 已选择文件：{uploaded_file.name} ({file_size/1024:.1f}KB)")
-    
     submitted = st.form_submit_button("提交作品", type="primary")
 
 if submitted:
     errors = []
-    
     if not work_title:
         errors.append("作品名称不能为空")
-    
     if uploaded_file is None:
         errors.append("请上传Word文档")
     elif uploaded_file.size > MAX_FILE_SIZE:
         errors.append("文件大小超过限制")
     else:
         file_content = uploaded_file.read()
-        
         scan_errors = scan_word_document(file_content, uploaded_file.name)
         if scan_errors:
             errors.append(f"⚠️ 安全检测未通过：{', '.join(scan_errors)}")
@@ -330,7 +260,6 @@ if submitted:
             with open(quarantine_path, 'wb') as f:
                 f.write(file_content)
             log_activity('virus_blocked', user_key, f"{uploaded_file.name} - {', '.join(scan_errors)}")
-    
     if errors:
         for err in errors:
             if "安全检测" in err:
@@ -340,8 +269,7 @@ if submitted:
                 st.error(f"❌ {err}")
     else:
         try:
-            # 删除旧作品（若存在）
-            data = load_data()  # 重新读取最新数据
+            data = load_data()
             for idx, s in enumerate(data['submissions']):
                 if s['user_key'] == user_key:
                     old_file = s.get('file_path')
@@ -350,18 +278,10 @@ if submitted:
                         log_activity('file_removed', user_key, f"Deleted old file: {old_file}")
                     data['submissions'].pop(idx)
                     break
-            
-            # 保存新文件
             safe_name = safe_filename(uploaded_file.name, user_key)
             file_path = os.path.join(UPLOAD_DIR, safe_name)
             with open(file_path, 'wb') as f:
                 f.write(file_content)
-            try:
-                os.chmod(file_path, 0o444)
-            except:
-                pass
-            
-            # 添加新记录
             data['submissions'].append({
                 'user_key': user_key,
                 'class_name': st.session_state.user_grade,
@@ -374,27 +294,24 @@ if submitted:
                 'time': datetime.now().isoformat()
             })
             save_data(data)
-            
             log_activity('submit_success', user_key, work_title)
             st.success("🎉 作品提交成功！" + (" (已覆盖旧作品)" if user_submission else ""))
             st.balloons()
             st.rerun()
-            
         except Exception as e:
             log_activity('submit_error', user_key, str(e))
             st.error(f"提交异常，请稍后重试")
 
-# ---------- 管理员仪表板（仅在验证通过后显示） ----------
+# ---------- 管理员仪表板 ----------
 if st.session_state.get('is_admin', False):
     st.sidebar.title("📊 管理仪表板")
     st.sidebar.metric("总参赛人数", len(data['submissions']))
     virus_count = len(os.listdir(VIRUS_SCAN_DIR)) if os.path.exists(VIRUS_SCAN_DIR) else 0
     st.sidebar.metric("隔离文件数", virus_count)
-    
+
     if data['submissions']:
         df = pd.DataFrame(data['submissions'])
         st.sidebar.dataframe(df[['class_name', 'student_name', 'work_title', 'time']])
-        
         for idx, row in df.iterrows():
             if row['file_path'] and os.path.exists(row['file_path']):
                 with open(row['file_path'], 'rb') as f:
@@ -404,7 +321,6 @@ if st.session_state.get('is_admin', False):
                         file_name=os.path.basename(row['file_path']),
                         key=f"download_{idx}"
                     )
-        
         if st.sidebar.button("📤 导出所有数据（JSON）"):
             json_str = json.dumps(data['submissions'], ensure_ascii=False, indent=2)
             st.sidebar.download_button(
@@ -413,7 +329,29 @@ if st.session_state.get('is_admin', False):
                 file_name=f"参赛数据_{datetime.now().strftime('%Y%m%d')}.json",
                 mime="application/json"
             )
-    
+
+    # 安全日志查看
+    with st.sidebar.expander("📋 安全日志"):
+        if os.path.exists('security.log'):
+            try:
+                with open('security.log', 'r', encoding='utf-8') as log_file:
+                    logs = log_file.readlines()
+                    if logs:
+                        recent_logs = logs[-50:]
+                        for line in reversed(recent_logs):
+                            try:
+                                entry = json.loads(line)
+                                st.text(f"{entry['time']} - {entry['action']} - {entry['user']} - {entry['detail']}")
+                            except:
+                                st.text(line.strip())
+                    else:
+                        st.success("✅ 暂无日志")
+            except Exception as e:
+                st.error(f"读取日志失败: {e}")
+        else:
+            st.info("日志文件尚未生成")
+
+    # 隔离文件列表
     with st.sidebar.expander("⚠️ 隔离文件列表"):
         if os.path.exists(VIRUS_SCAN_DIR):
             virus_files = os.listdir(VIRUS_SCAN_DIR)
@@ -422,14 +360,13 @@ if st.session_state.get('is_admin', False):
                     st.sidebar.text(f"🔴 {vf}")
             else:
                 st.sidebar.success("✅ 无隔离文件")
-    
-    # ---------- 一键删除所有作品 ----------
+
+    # 一键删除所有作品
     st.sidebar.divider()
     st.sidebar.error("🧹 危险操作区")
     confirm_delete = st.sidebar.checkbox("⚠️ 我确认要删除所有作品及文件，此操作不可恢复")
     if st.sidebar.button("一键删除所有作品", disabled=not confirm_delete):
         if confirm_delete:
-            # 删除所有上传文件
             if os.path.exists(UPLOAD_DIR):
                 for file in os.listdir(UPLOAD_DIR):
                     file_path = os.path.join(UPLOAD_DIR, file)
@@ -437,13 +374,12 @@ if st.session_state.get('is_admin', False):
                         os.remove(file_path)
                     except Exception as e:
                         st.sidebar.error(f"删除文件失败：{file} - {e}")
-            # 清空提交记录
             data['submissions'] = []
             save_data(data)
             log_activity('admin_delete_all', 'admin', 'All submissions and files deleted')
             st.sidebar.success("✅ 所有作品及文件已删除")
             st.rerun()
-    
+
     if st.sidebar.button("🚪 退出管理"):
         st.session_state.is_admin = False
         st.rerun()
