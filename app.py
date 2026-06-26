@@ -19,6 +19,12 @@ VIRUS_SCAN_DIR = 'virus_quarantine'
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "password")
 ADMIN_PASSWORD_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
+
+GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
+
 # ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
     errors = []
