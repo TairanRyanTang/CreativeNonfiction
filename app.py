@@ -29,71 +29,8 @@ GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
-# ========== 新增：应用启动时自动从 GitHub 恢复数据 ==========
-def restore_from_github():
-    """如果本地数据文件不存在，从 GitHub 私有仓库恢复最新备份"""
-    try:
-        from github import Github
-        token = st.secrets.get("GITHUB_TOKEN")
-        repo_name = st.secrets.get("GITHUB_REPO")
-        if not token or not repo_name:
-            return  # 未配置 GitHub 备份，跳过
-
-        # 只在本地数据文件丢失时才恢复（例如休眠后被清空）
-        if os.path.exists(DATA_FILE):
-            return
-
-        g = Github(token)
-        repo = g.get_repo(repo_name)
-        contents = repo.get_contents("")
-
-        # 找到最新的 data.json 和 uploads.zip 备份
-        data_files = []
-        zip_files = []
-        for c in contents:
-            if c.name.startswith("backup_") and c.name.endswith("_data.json"):
-                data_files.append(c)
-            elif c.name.startswith("backup_") and c.name.endswith("_uploads.zip"):
-                zip_files.append(c)
-
-        if not data_files:
-            return  # 没有备份
-
-        # 按文件名排序（时间戳最新在前）
-        data_files.sort(key=lambda x: x.name, reverse=True)
-        zip_files.sort(key=lambda x: x.name, reverse=True)
-
-        # 恢复 data.json
-        latest_data = data_files[0]
-        data_content = base64.b64decode(latest_data.content).decode('utf-8')
-        new_data = json.loads(data_content)
-        if 'submissions' in new_data and 'users' in new_data:
-            with open(DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump(new_data, f, ensure_ascii=False, indent=2)
-            log_activity('github_restore_data', 'system', f'Restored {latest_data.name}')
-        else:
-            raise ValueError("data.json 格式不正确")
-
-        # 恢复 uploads.zip
-        if zip_files and not os.path.exists(UPLOAD_DIR):
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-        if zip_files:
-            latest_zip = zip_files[0]
-            zip_bytes = base64.b64decode(latest_zip.content)
-            with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-                zf.extractall(UPLOAD_DIR)
-            log_activity('github_restore_uploads', 'system', f'Restored {latest_zip.name}')
-
-    except Exception as e:
-        log_activity('github_restore_failed', 'system', str(e)[:200])
-
-# 在首次使用前调用恢复逻辑
-restore_from_github()
-# =====================================================
-
 # ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
-    # ... 保持不变 ...
     errors = []
     if filename.lower().endswith('.docx'):
         if file_content[:4] != b'PK\x03\x04':
@@ -120,7 +57,6 @@ def scan_word_document(file_content, filename):
 
 # ---------- docx 文本提取（标准库） ----------
 def extract_text_from_docx(file_content):
-    # ... 保持不变 ...
     try:
         text_parts = []
         with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
@@ -141,7 +77,6 @@ def extract_text_from_docx(file_content):
         return f"⚠️ 解析错误：{str(e)[:100]}"
 
 def preview_docx(file_path):
-    # ... 保持不变 ...
     try:
         with open(file_path, 'rb') as f:
             content = f.read()
@@ -172,6 +107,69 @@ def load_data():
             return {'submissions': [], 'users': {}}
     return {'submissions': [], 'users': {}}
 
+def log_activity(action, user_id, detail=""):
+    entry = {'time': datetime.now().isoformat(), 'action': action, 'user': user_id, 'detail': detail}
+    print(json.dumps(entry, ensure_ascii=False))  # 输出到 Streamlit Cloud 日志
+
+def get_user_key(grade, name):
+    return f"{grade}_{name}".strip()
+
+# ---------- GitHub 自动备份与恢复 ----------
+def restore_from_github():
+    """如果本地数据文件不存在，从 GitHub 私有仓库恢复最新备份"""
+    try:
+        from github import Github
+        token = st.secrets.get("GITHUB_TOKEN")
+        repo_name = st.secrets.get("GITHUB_REPO")
+        if not token or not repo_name:
+            return  # 未配置，跳过
+
+        # 只在本地数据文件丢失时才恢复（例如休眠后被清空）
+        if os.path.exists(DATA_FILE):
+            return
+
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        contents = repo.get_contents("")
+
+        data_files = []
+        zip_files = []
+        for c in contents:
+            if c.name.startswith("backup_") and c.name.endswith("_data.json"):
+                data_files.append(c)
+            elif c.name.startswith("backup_") and c.name.endswith("_uploads.zip"):
+                zip_files.append(c)
+
+        if not data_files:
+            return  # 没有备份
+
+        data_files.sort(key=lambda x: x.name, reverse=True)
+        zip_files.sort(key=lambda x: x.name, reverse=True)
+
+        # 恢复 data.json
+        latest_data = data_files[0]
+        data_content = base64.b64decode(latest_data.content).decode('utf-8')
+        new_data = json.loads(data_content)
+        if 'submissions' in new_data and 'users' in new_data:
+            with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(new_data, f, ensure_ascii=False, indent=2)
+            log_activity('github_restore_data', 'system', f'Restored {latest_data.name}')
+        else:
+            raise ValueError("data.json 格式不正确")
+
+        # 恢复 uploads.zip
+        if zip_files:
+            if not os.path.exists(UPLOAD_DIR):
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+            latest_zip = zip_files[0]
+            zip_bytes = base64.b64decode(latest_zip.content)
+            with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+                zf.extractall(UPLOAD_DIR)
+            log_activity('github_restore_uploads', 'system', f'Restored {latest_zip.name}')
+
+    except Exception as e:
+        log_activity('github_restore_failed', 'system', str(e)[:200])
+
 def backup_to_github(data):
     """将 data.json 和 uploads/ 打包上传到 GitHub 私有仓库"""
     try:
@@ -180,12 +178,12 @@ def backup_to_github(data):
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
             return
-        
+
         g = Github(token)
         repo = g.get_repo(repo_name)
-        
+
         json_str = json.dumps(data, ensure_ascii=False, indent=2)
-        
+
         uploads_zip_bytes = None
         if os.path.exists(UPLOAD_DIR) and os.listdir(UPLOAD_DIR):
             zip_buffer = io.BytesIO()
@@ -195,18 +193,18 @@ def backup_to_github(data):
                         file_path = os.path.join(root, file)
                         zf.write(file_path, file)
             uploads_zip_bytes = zip_buffer.getvalue()
-        
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
+
         data_filename = f"backup_{timestamp}_data.json"
         repo.create_file(data_filename, f"Backup data at {timestamp}", json_str)
-        
+
         if uploads_zip_bytes:
             content_b64 = base64.b64encode(uploads_zip_bytes).decode()
             zip_filename = f"backup_{timestamp}_uploads.zip"
             repo.create_file(zip_filename, f"Backup uploads at {timestamp}", content_b64)
-        
-        # 清理旧备份
+
+        # 清理旧备份：每种类型最多保留 10 个
         contents = repo.get_contents("")
         backup_files = [c for c in contents if c.name.startswith("backup_")]
         backup_files.sort(key=lambda x: x.name, reverse=True)
@@ -216,7 +214,7 @@ def backup_to_github(data):
             repo.delete_file(old_file.path, "Cleanup old backup", old_file.sha)
         for old_file in zip_files[10:]:
             repo.delete_file(old_file.path, "Cleanup old backup", old_file.sha)
-        
+
         log_activity('github_backup_success', 'system', f'Backup {timestamp}')
     except Exception as e:
         log_activity('github_backup_failed', 'system', str(e)[:200])
@@ -226,29 +224,22 @@ def save_data(data):
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, DATA_FILE)
-    
+
     # 自动备份到 GitHub（每分钟最多一次）
     try:
         if 'last_backup_time' not in st.session_state:
             st.session_state.last_backup_time = None
         now = datetime.now()
-        if (st.session_state.last_backup_time is None 
+        if (st.session_state.last_backup_time is None
             or (now - st.session_state.last_backup_time).total_seconds() > 60):
             backup_to_github(data)
             st.session_state.last_backup_time = now
     except Exception as e:
         log_activity('github_backup_trigger_failed', 'system', str(e)[:200])
 
-def log_activity(action, user_id, detail=""):
-    entry = {'time': datetime.now().isoformat(), 'action': action, 'user': user_id, 'detail': detail}
-    print(json.dumps(entry, ensure_ascii=False))
-
-def get_user_key(grade, name):
-    return f"{grade}_{name}".strip()
-
 # ---------- 备份/恢复函数（手动下载/上传） ----------
 def create_backup_zip(data):
-    # ... 保持不变 ...
+    """创建包含 data.json 和 uploads/ 的 zip 文件"""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
@@ -261,7 +252,7 @@ def create_backup_zip(data):
     return zip_buffer.getvalue()
 
 def restore_backup_zip(zip_bytes):
-    # ... 保持不变 ...
+    """从上传的 zip 文件恢复 data.json 和 uploads/"""
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
         if 'data.json' not in zf.namelist():
             raise ValueError("备份文件中缺少 data.json")
@@ -287,6 +278,9 @@ def restore_backup_zip(zip_bytes):
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
     return True
+
+# ---------- 应用启动时自动恢复数据 ----------
+restore_from_github()
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="比赛作品提交系统", page_icon="🔒")
@@ -318,7 +312,7 @@ if st.session_state.is_admin:
     st.success("🔓 管理员模式")
     data = load_data()
 
-    # 备份与恢复区域（手动操作）
+    # 备份与恢复区域
     st.subheader("💾 数据备份与恢复")
     col_bkp1, col_bkp2 = st.columns(2)
     with col_bkp1:
