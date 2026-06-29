@@ -7,36 +7,27 @@ import zipfile
 import io
 import xml.etree.ElementTree as ET
 from datetime import datetime
-import shutil
 import base64
 
 # ---------- 安全配置 ----------
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
-ALLOWED_EXTENSIONS = {'doc', 'docx'}
+ALLOWED_EXTENSIONS = {'docx'}      # 仅接受 docx，因为需要提取文本
 
-UPLOAD_DIR = '/tmp/uploads'
 DATA_FILE = '/tmp/data.json'
-VIRUS_SCAN_DIR = '/tmp/virus_quarantine'
 
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "password")
 ADMIN_PASSWORD_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
 GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
-
-# ---------- 病毒检测 ----------
+# ---------- 病毒检测（仅检测宏，不隔离） ----------
 def scan_word_document(file_content, filename):
     errors = []
     if filename.lower().endswith('.docx'):
         if file_content[:4] != b'PK\x03\x04':
             errors.append("无效的docx文件格式")
-    elif filename.lower().endswith('.doc'):
-        if len(file_content) < 8 or file_content[:8] != b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1':
-            errors.append("无效的doc文件格式")
     else:
-        return ["不支持的文件格式"]
+        return ["不支持的文件格式，仅接受 .docx"]
     if filename.lower().endswith('.docx'):
         try:
             with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
@@ -48,7 +39,7 @@ def scan_word_document(file_content, filename):
             errors.append("文件损坏")
     if len(file_content) < 1024:
         errors.append("文件过小")
-    if len(file_content) > 50*1024*1024:
+    if len(file_content) > MAX_FILE_SIZE:
         errors.append("文件过大")
     return errors
 
@@ -69,26 +60,11 @@ def extract_text_from_docx(file_content):
                     if para_text:
                         text_parts.append(''.join(para_text))
                 return '\n\n'.join(text_parts)
-        return "⚠️ 无法读取文档内容"
+        return "⚠️ 无法读取文档内容（可能是空白文档或格式不支持）"
     except Exception as e:
         return f"⚠️ 解析错误：{str(e)[:100]}"
 
-def preview_docx(file_path):
-    try:
-        with open(file_path, 'rb') as f:
-            content = f.read()
-        return extract_text_from_docx(content)
-    except:
-        return "⚠️ 文件读取失败"
-
 # ---------- 工具函数 ----------
-def safe_filename(original_name, user_id):
-    ext = original_name.rsplit('.', 1)[-1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise ValueError("不支持的文件类型")
-    ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
-    return f"{user_id}_{ts}.{ext}"
-
 def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
@@ -111,12 +87,8 @@ def log_activity(action, user_id, detail=""):
 def get_user_key(grade, name):
     return f"{grade}_{name}".strip()
 
-def safe_relpath(file_path, base_dir):
-    rel = os.path.relpath(file_path, base_dir)
-    return rel.replace(os.sep, '/')
-
-# ---------- GitHub 备份与恢复 ----------
-CACHE_PATH = "cache/backup_latest.zip"
+# ---------- GitHub 备份与恢复（JSON 模式） ----------
+CACHE_PATH = "cache/data.json"
 
 def restore_from_github():
     msg = ""
@@ -138,31 +110,15 @@ def restore_from_github():
         except:
             return "❌ 未找到缓存文件，无法自动恢复"
 
-        zip_b64 = contents.content
-        zip_bytes = base64.b64decode(zip_b64)
+        # 手动 base64 解码得到 JSON 字符串
+        json_b64 = contents.content
+        json_str = base64.b64decode(json_b64).decode('utf-8')
+        new_data = json.loads(json_str)
+        if 'submissions' not in new_data or 'users' not in new_data:
+            return "❌ 缓存文件格式不正确"
 
-        with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-            if 'data.json' not in zf.namelist():
-                return "❌ 缓存中缺少 data.json"
-            with zf.open('data.json') as source, open(DATA_FILE, 'wb') as target:
-                shutil.copyfileobj(source, target)
-            try:
-                with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                    json.load(f)
-            except:
-                os.remove(DATA_FILE)
-                return "❌ 缓存中 data.json 损坏"
-
-            if os.path.exists(UPLOAD_DIR):
-                shutil.rmtree(UPLOAD_DIR)
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            for member in zf.namelist():
-                if member.startswith('uploads/') and not member.endswith('/'):
-                    target_path = os.path.join('/tmp', member.replace('/', os.sep))
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                    with zf.open(member) as source, open(target_path, 'wb') as target:
-                        shutil.copyfileobj(source, target)
-
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(new_data, f, ensure_ascii=False, indent=2)
         msg = "✅ 数据已从 GitHub 缓存恢复"
         log_activity('github_restore_success', 'system', 'Restored from cache')
     except Exception as e:
@@ -170,27 +126,7 @@ def restore_from_github():
         log_activity('github_restore_failed', 'system', str(e)[:200])
     return msg
 
-def create_backup_zip(data):
-    """生成与手动下载完全相同的 ZIP 文件（已验证有效）"""
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
-        if os.path.exists(UPLOAD_DIR):
-            for root, dirs, files in os.walk(UPLOAD_DIR):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = 'uploads/' + safe_relpath(file_path, UPLOAD_DIR)
-                    zf.write(file_path, arcname)
-    zip_bytes = zip_buffer.getvalue()
-    try:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as test_zip:
-            test_zip.testzip()
-    except Exception as e:
-        raise RuntimeError(f"生成的备份 ZIP 无效：{str(e)}")
-    return zip_bytes
-
 def backup_to_github(data):
-    """复用 create_backup_zip 生成有效 ZIP 并上传到 GitHub 缓存"""
     try:
         from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
@@ -199,12 +135,12 @@ def backup_to_github(data):
             st.session_state.backup_msg = "ℹ️ GitHub 未配置，跳过备份"
             return
 
-        # 直接使用已验证的 create_backup_zip
-        zip_bytes = create_backup_zip(data)
-        content_b64 = base64.b64encode(zip_bytes).decode()
-
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
+
+        # 直接使用 data.json 的内容（字符串），base64 编码上传
+        json_str = json.dumps(data, ensure_ascii=False, indent=2)
+        content_b64 = base64.b64encode(json_str.encode('utf-8')).decode()
 
         # 删除旧缓存
         try:
@@ -226,31 +162,19 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, DATA_FILE)
 
-def restore_backup_zip(zip_bytes):
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-        if 'data.json' not in zf.namelist():
-            raise ValueError("备份文件中缺少 data.json")
-        with zf.open('data.json') as f:
-            new_data = json.load(f)
-            if 'submissions' not in new_data or 'users' not in new_data:
-                raise ValueError("data.json 格式不正确")
-        if os.path.exists(UPLOAD_DIR):
-            shutil.rmtree(UPLOAD_DIR)
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        for member in zf.namelist():
-            if member == 'data.json':
-                continue
-            if not member.startswith('uploads/'):
-                continue
-            target_path = os.path.join('/tmp', member.replace('/', os.sep))
-            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            with zf.open(member) as source, open(target_path, 'wb') as target:
-                shutil.copyfileobj(source, target)
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(new_data, f, ensure_ascii=False, indent=2)
+# ---------- 手动备份/恢复（JSON 文件） ----------
+def create_backup_json(data):
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+def restore_backup_json(json_str):
+    new_data = json.loads(json_str)
+    if 'submissions' not in new_data or 'users' not in new_data:
+        raise ValueError("JSON 格式不正确")
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(new_data, f, ensure_ascii=False, indent=2)
     return True
 
-# ---------- 启动恢复 ----------
+# ---------- 启动时自动恢复 ----------
 restore_msg = restore_from_github()
 if 'restore_msg' not in st.session_state:
     st.session_state.restore_msg = restore_msg
@@ -296,34 +220,33 @@ if st.session_state.is_admin:
             st.warning(st.session_state.restore_msg)
         st.session_state.restore_msg = ""
 
+    # 备份与恢复区域
     st.subheader("💾 数据备份与恢复")
     col_bkp1, col_bkp2 = st.columns(2)
     with col_bkp1:
-        if st.button("📥 一键备份所有数据（下载ZIP）"):
-            try:
-                zip_data = create_backup_zip(data)
-                st.download_button(
-                    label="下载备份文件",
-                    data=zip_data,
-                    file_name=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                    mime="application/zip",
-                    key="backup_download"
-                )
-                st.success("备份文件已生成，点击上方按钮下载")
-            except Exception as e:
-                st.error(f"生成备份失败：{str(e)}")
+        if st.button("📥 一键备份所有数据（下载JSON）"):
+            json_str = create_backup_json(data)
+            st.download_button(
+                label="下载备份文件",
+                data=json_str,
+                file_name=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                key="backup_download"
+            )
+            st.success("备份文件已生成，点击上方按钮下载")
     with col_bkp2:
-        uploaded_backup = st.file_uploader("📤 上传备份文件恢复", type="zip", key="restore_zip")
+        uploaded_backup = st.file_uploader("📤 上传备份文件恢复", type="json", key="restore_json")
         if uploaded_backup is not None:
             if st.button("确认恢复备份", key="confirm_restore"):
                 try:
-                    restore_backup_zip(uploaded_backup.read())
+                    restore_backup_json(uploaded_backup.read().decode('utf-8'))
                     st.success("✅ 数据恢复成功！请刷新页面查看")
                     log_activity('admin_restore', 'admin', '成功恢复备份')
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ 恢复失败：{str(e)}")
 
+    # 手动更新 GitHub 缓存
     st.divider()
     st.subheader("☁️ 手动更新 GitHub 缓存")
     if st.button("📤 立即更新缓存到 GitHub"):
@@ -338,11 +261,14 @@ if st.session_state.is_admin:
     st.caption(f"最近缓存状态：{st.session_state.backup_msg}")
 
     st.divider()
+
+    # 统计数据
     col1, col2 = st.columns(2)
     col1.metric("总参赛人数", len(data['submissions']))
-    virus_cnt = len(os.listdir(VIRUS_SCAN_DIR)) if os.path.exists(VIRUS_SCAN_DIR) else 0
-    col2.metric("隔离文件数", virus_cnt)
+    # 不再有隔离文件，去除相关显示
+    col2.metric("文本作品数", len(data['submissions']))
 
+    # 作品列表
     if data['submissions']:
         st.subheader("📄 作品列表")
         for idx, row in enumerate(data['submissions']):
@@ -356,11 +282,17 @@ if st.session_state.is_admin:
                 else:
                     cols[2].write(title)
                 cols[3].write(row.get('time', '')[:16])
-                if row.get('file_path') and os.path.exists(row['file_path']):
-                    with open(row['file_path'], 'rb') as f:
-                        cols[4].download_button("⬇️", data=f, file_name=os.path.basename(row['file_path']), key=f"dl_{idx}")
+                # 下载按钮改为下载文本
+                if row.get('content_text'):
+                    txt = row['content_text']
+                    cols[4].download_button(
+                        "⬇️", data=txt,
+                        file_name=f"{row.get('work_title', '作品')}.txt",
+                        mime="text/plain",
+                        key=f"dl_{idx}"
+                    )
                 else:
-                    cols[4].write("无")
+                    cols[4].write("无文本")
                 if cols[5].button("📖", key=f"prev_{idx}"):
                     st.session_state.preview_idx = idx
                     st.rerun()
@@ -377,6 +309,7 @@ if st.session_state.is_admin:
     else:
         st.info("暂无提交作品")
 
+    # 预览与评分
     if st.session_state.preview_idx is not None:
         idx = st.session_state.preview_idx
         if idx < len(data['submissions']):
@@ -385,17 +318,11 @@ if st.session_state.is_admin:
             st.subheader(f"📖 {sub.get('student_name', '')} - {sub.get('work_title', '')}")
             st.write(f"**年级**：{sub.get('class_name', '')}")
             st.write(f"**简介**：{sub.get('work_desc', '')}")
-            file_path = sub.get('file_path')
-            if file_path and os.path.exists(file_path):
-                ext = os.path.splitext(file_path)[1].lower()
-                if ext == '.docx':
-                    with st.spinner("加载文档..."):
-                        text = preview_docx(file_path)
-                        st.text_area("文档内容", text, height=300, disabled=True)
-                else:
-                    st.warning("不支持预览 .doc 格式，请下载查看")
+            # 直接显示文本内容
+            if sub.get('content_text'):
+                st.text_area("文档内容", sub['content_text'], height=300, disabled=True)
             else:
-                st.error("文件不存在")
+                st.warning("该作品无文本内容")
 
             st.subheader("✍️ 评分")
             existing_scores = sub.get('scores', {})
@@ -407,7 +334,7 @@ if st.session_state.is_admin:
                 if st.form_submit_button("保存评分"):
                     data = load_data()
                     for s in data['submissions']:
-                        if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
+                        if s.get('user_key') == sub.get('user_key'):
                             s['scores'] = {'narration': nar, 'reflection': ref, 'identity': ide, 'intimacy': inti}
                             break
                     save_data(data)
@@ -415,13 +342,14 @@ if st.session_state.is_admin:
                     st.success("✅ 评分已保存")
                     st.rerun()
 
+            # 标记待复核
             st.divider()
             flagged = sub.get('flagged', False)
             if flagged:
                 if st.button("✅ 取消标记（已复核）"):
                     data = load_data()
                     for s in data['submissions']:
-                        if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
+                        if s.get('user_key') == sub.get('user_key'):
                             s['flagged'] = False
                             break
                     save_data(data)
@@ -432,7 +360,7 @@ if st.session_state.is_admin:
                 if st.button("🚩 标记为待复核"):
                     data = load_data()
                     for s in data['submissions']:
-                        if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
+                        if s.get('user_key') == sub.get('user_key'):
                             s['flagged'] = True
                             break
                     save_data(data)
@@ -444,23 +372,16 @@ if st.session_state.is_admin:
                 st.session_state.preview_idx = None
                 st.rerun()
 
-    with st.expander("⚠️ 隔离文件列表"):
-        if os.path.exists(VIRUS_SCAN_DIR):
-            vfs = os.listdir(VIRUS_SCAN_DIR)
-            if vfs:
-                for vf in vfs:
-                    st.text(f"🔴 {vf}")
-            else:
-                st.success("✅ 无隔离文件")
+    # 日志
+    with st.expander("📋 最近日志（控制台输出）"):
+        st.write("请查看 Streamlit Cloud 的 'Manage app' → 'Logs' 获取详细日志")
 
+    # 危险操作
     st.divider()
     st.error("🧹 危险操作区")
     confirm = st.checkbox("⚠️ 我确认要删除所有作品及文件，此操作不可恢复")
     if st.button("一键删除所有作品", disabled=not confirm):
         if confirm:
-            if os.path.exists(UPLOAD_DIR):
-                shutil.rmtree(UPLOAD_DIR)
-                os.makedirs(UPLOAD_DIR, exist_ok=True)
             data['submissions'] = []
             save_data(data)
             backup_to_github(data)
@@ -517,6 +438,7 @@ if st.session_state.user_id is None:
                 st.rerun()
     st.stop()
 
+# 已登录学生
 st.success(f"当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
 if st.button("🚪 退出登录"):
@@ -526,6 +448,7 @@ if st.button("🚪 退出登录"):
     st.session_state.submit_success = False
     st.rerun()
 
+# 提交成功页面
 if st.session_state.submit_success:
     st.balloons()
     st.title("🎉 作品提交成功！")
@@ -542,7 +465,8 @@ if st.session_state.submit_success:
         st.write(f"**作品名称**：{my_sub.get('work_title', '未知')}")
         st.write(f"**作品简介**：{my_sub.get('work_desc', '无')}")
         st.write(f"**提交时间**：{my_sub.get('time', '未知')}")
-        st.write(f"**文件名**：{os.path.basename(my_sub.get('file_path', ''))}")
+        if my_sub.get('content_text'):
+            st.write(f"**文本长度**：{len(my_sub['content_text'])} 字符")
         if my_sub.get('scores'):
             scores = my_sub['scores']
             total = sum(scores.values())
@@ -560,6 +484,7 @@ if st.session_state.submit_success:
         st.rerun()
     st.stop()
 
+# 显示评分
 user_key = st.session_state.user_id
 my_sub = None
 for s in data['submissions']:
@@ -584,6 +509,8 @@ if my_sub:
         st.write(f"年级：{my_sub['class_name']}")
         st.write(f"作品名：{my_sub['work_title']}")
         st.write(f"提交时间：{my_sub['time']}")
+        if my_sub.get('content_text'):
+            st.write(f"文本长度：{len(my_sub['content_text'])} 字符")
 
 st.subheader("📤 提交/更新作品")
 with st.form("submit_form"):
@@ -591,7 +518,7 @@ with st.form("submit_form"):
     st.text_input("姓名", value=st.session_state.user_name, disabled=True)
     work_title = st.text_input("作品名称", max_chars=100)
     work_desc = st.text_area("作品简介", max_chars=500)
-    uploaded_file = st.file_uploader("上传Word文档 (.doc/.docx)", type=['doc', 'docx'])
+    uploaded_file = st.file_uploader("上传Word文档 (.docx)", type=['docx'])
     if uploaded_file:
         if uploaded_file.size > MAX_FILE_SIZE:
             st.error("文件超过20MB")
@@ -610,41 +537,37 @@ with st.form("submit_form"):
             scan_err = scan_word_document(content, uploaded_file.name)
             if scan_err:
                 st.error(f"安全检测未通过：{', '.join(scan_err)}")
-                qname = f"{user_key}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uploaded_file.name}"
-                with open(os.path.join(VIRUS_SCAN_DIR, qname), 'wb') as f:
-                    f.write(content)
-                log_activity('virus_blocked', user_key, qname)
             else:
-                try:
-                    data = load_data()
-                    for i, s in enumerate(data['submissions']):
-                        if s['user_key'] == user_key:
-                            if s.get('file_path') and os.path.exists(s['file_path']):
-                                os.remove(s['file_path'])
-                            data['submissions'].pop(i)
-                            break
-                    fname = safe_filename(uploaded_file.name, user_key)
-                    fpath = os.path.join(UPLOAD_DIR, fname)
-                    with open(fpath, 'wb') as f:
-                        f.write(content)
-                    new_sub = {
-                        'user_key': user_key,
-                        'class_name': st.session_state.user_grade,
-                        'student_name': st.session_state.user_name,
-                        'work_title': work_title,
-                        'work_desc': work_desc,
-                        'file_path': fpath,
-                        'file_size': uploaded_file.size,
-                        'time': datetime.now().isoformat()
-                    }
-                    data['submissions'].append(new_sub)
-                    save_data(data)
-                    backup_to_github(data)
-                    log_activity('submit_success', user_key, work_title)
-                    st.session_state.submit_success = True
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"提交异常：{str(e)[:100]}")
+                # 提取文本
+                extracted_text = extract_text_from_docx(content)
+                if extracted_text.startswith("⚠️"):
+                    st.error(f"文本提取失败：{extracted_text}")
+                else:
+                    try:
+                        data = load_data()
+                        user_key = st.session_state.user_id
+                        # 删除旧作品
+                        for i, s in enumerate(data['submissions']):
+                            if s['user_key'] == user_key:
+                                data['submissions'].pop(i)
+                                break
+                        new_sub = {
+                            'user_key': user_key,
+                            'class_name': st.session_state.user_grade,
+                            'student_name': st.session_state.user_name,
+                            'work_title': work_title,
+                            'work_desc': work_desc,
+                            'content_text': extracted_text,
+                            'time': datetime.now().isoformat()
+                        }
+                        data['submissions'].append(new_sub)
+                        save_data(data)
+                        backup_to_github(data)
+                        log_activity('submit_success', user_key, work_title)
+                        st.session_state.submit_success = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"提交异常：{str(e)[:100]}")
 
 # 侧边栏
 st.sidebar.divider()
@@ -661,9 +584,9 @@ else:
     st.sidebar.caption("暂无缓存记录")
 st.sidebar.divider()
 st.sidebar.caption("🔒 安全特性：")
-st.sidebar.caption("- 仅接受Word文档 (.doc/.docx)")
+st.sidebar.caption("- 仅接受Word文档 (.docx)")
 st.sidebar.caption("- 宏病毒自动扫描")
 st.sidebar.caption("- 恶意代码检测")
-st.sidebar.caption("- 危险文件自动隔离")
 st.sidebar.caption("- 文件大小限制 (20MB)")
+st.sidebar.caption("- 文档内容以文本形式存储")
 st.sidebar.caption("- 提交可覆盖，以最新为准")
