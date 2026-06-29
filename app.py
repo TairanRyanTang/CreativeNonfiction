@@ -11,7 +11,7 @@ import base64
 
 # ---------- 安全配置 ----------
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
-ALLOWED_EXTENSIONS = {'docx'}      # 仅接受 docx，因为需要提取文本
+ALLOWED_EXTENSIONS = {'docx'}
 
 DATA_FILE = '/tmp/data.json'
 
@@ -20,7 +20,7 @@ ADMIN_PASSWORD_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
 GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
 
-# ---------- 病毒检测（仅检测宏，不隔离） ----------
+# ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
     errors = []
     if filename.lower().endswith('.docx'):
@@ -87,7 +87,7 @@ def log_activity(action, user_id, detail=""):
 def get_user_key(grade, name):
     return f"{grade}_{name}".strip()
 
-# ---------- GitHub 备份与恢复（JSON 模式） ----------
+# ---------- GitHub 备份与恢复（JSON 模式）----------
 CACHE_PATH = "cache/data.json"
 
 def restore_from_github():
@@ -110,9 +110,9 @@ def restore_from_github():
         except:
             return "❌ 未找到缓存文件，无法自动恢复"
 
-        # 手动 base64 解码得到 JSON 字符串
-        json_b64 = contents.content
-        json_str = base64.b64decode(json_b64).decode('utf-8')
+        # 使用 decoded_content 获取原始 JSON 字节（避免双重编码）
+        json_bytes = contents.decoded_content
+        json_str = json_bytes.decode('utf-8')
         new_data = json.loads(json_str)
         if 'submissions' not in new_data or 'users' not in new_data:
             return "❌ 缓存文件格式不正确"
@@ -138,9 +138,8 @@ def backup_to_github(data):
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
 
-        # 直接使用 data.json 的内容（字符串），base64 编码上传
+        # 直接上传 JSON 字符串，PyGithub 会自动进行 base64 编码
         json_str = json.dumps(data, ensure_ascii=False, indent=2)
-        content_b64 = base64.b64encode(json_str.encode('utf-8')).decode()
 
         # 删除旧缓存
         try:
@@ -149,7 +148,7 @@ def backup_to_github(data):
         except:
             pass
 
-        repo.create_file(CACHE_PATH, f"缓存更新 {datetime.now().isoformat()}", content_b64)
+        repo.create_file(CACHE_PATH, f"缓存更新 {datetime.now().isoformat()}", json_str)
         st.session_state.backup_msg = f"✅ 缓存已更新至 GitHub ({CACHE_PATH})"
         log_activity('github_backup_success', 'system', 'Cache updated')
     except Exception as e:
@@ -162,7 +161,7 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, DATA_FILE)
 
-# ---------- 手动备份/恢复（JSON 文件） ----------
+# ---------- 手动备份/恢复（JSON 文件）----------
 def create_backup_json(data):
     return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -265,7 +264,6 @@ if st.session_state.is_admin:
     # 统计数据
     col1, col2 = st.columns(2)
     col1.metric("总参赛人数", len(data['submissions']))
-    # 不再有隔离文件，去除相关显示
     col2.metric("文本作品数", len(data['submissions']))
 
     # 作品列表
@@ -282,7 +280,6 @@ if st.session_state.is_admin:
                 else:
                     cols[2].write(title)
                 cols[3].write(row.get('time', '')[:16])
-                # 下载按钮改为下载文本
                 if row.get('content_text'):
                     txt = row['content_text']
                     cols[4].download_button(
@@ -318,7 +315,6 @@ if st.session_state.is_admin:
             st.subheader(f"📖 {sub.get('student_name', '')} - {sub.get('work_title', '')}")
             st.write(f"**年级**：{sub.get('class_name', '')}")
             st.write(f"**简介**：{sub.get('work_desc', '')}")
-            # 直接显示文本内容
             if sub.get('content_text'):
                 st.text_area("文档内容", sub['content_text'], height=300, disabled=True)
             else:
@@ -372,11 +368,9 @@ if st.session_state.is_admin:
                 st.session_state.preview_idx = None
                 st.rerun()
 
-    # 日志
     with st.expander("📋 最近日志（控制台输出）"):
         st.write("请查看 Streamlit Cloud 的 'Manage app' → 'Logs' 获取详细日志")
 
-    # 危险操作
     st.divider()
     st.error("🧹 危险操作区")
     confirm = st.checkbox("⚠️ 我确认要删除所有作品及文件，此操作不可恢复")
@@ -538,7 +532,6 @@ with st.form("submit_form"):
             if scan_err:
                 st.error(f"安全检测未通过：{', '.join(scan_err)}")
             else:
-                # 提取文本
                 extracted_text = extract_text_from_docx(content)
                 if extracted_text.startswith("⚠️"):
                     st.error(f"文本提取失败：{extracted_text}")
@@ -546,7 +539,6 @@ with st.form("submit_form"):
                     try:
                         data = load_data()
                         user_key = st.session_state.user_id
-                        # 删除旧作品
                         for i, s in enumerate(data['submissions']):
                             if s['user_key'] == user_key:
                                 data['submissions'].pop(i)
