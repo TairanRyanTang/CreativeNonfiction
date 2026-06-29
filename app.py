@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import shutil
 import tempfile
+import base64
 
 # ---------- 安全配置 ----------
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
@@ -106,11 +107,76 @@ def load_data():
             return {'submissions': [], 'users': {}}
     return {'submissions': [], 'users': {}}
 
+def backup_to_github(data):
+    """将 data.json 和 uploads/ 打包上传到 GitHub 私有仓库，保留时间戳文件名"""
+    try:
+        from github import Github
+        token = st.secrets.get("GITHUB_TOKEN")
+        repo_name = st.secrets.get("GITHUB_REPO")
+        if not token or not repo_name:
+            raise ValueError("GitHub 备份未配置：缺少 GITHUB_TOKEN 或 GITHUB_REPO")
+        
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        
+        # 1. 准备 data.json 内容
+        json_str = json.dumps(data, ensure_ascii=False, indent=2)
+        
+        # 2. 打包 uploads 目录
+        uploads_zip_bytes = None
+        if os.path.exists(UPLOAD_DIR) and os.listdir(UPLOAD_DIR):
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(UPLOAD_DIR):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        zf.write(file_path, file)
+            uploads_zip_bytes = zip_buffer.getvalue()
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # 3. 上传 data.json
+        data_filename = f"backup_{timestamp}_data.json"
+        repo.create_file(data_filename, f"Backup data at {timestamp}", json_str)
+        
+        # 4. 上传 uploads.zip（如果存在）
+        if uploads_zip_bytes:
+            content_b64 = base64.b64encode(uploads_zip_bytes).decode()
+            zip_filename = f"backup_{timestamp}_uploads.zip"
+            repo.create_file(zip_filename, f"Backup uploads at {timestamp}", content_b64)
+        
+        # 5. 清理旧备份：每种类型最多保留 10 个
+        contents = repo.get_contents("")
+        backup_files = [c for c in contents if c.name.startswith("backup_")]
+        backup_files.sort(key=lambda x: x.name, reverse=True)
+        data_files = [f for f in backup_files if f.name.endswith("_data.json")]
+        zip_files = [f for f in backup_files if f.name.endswith("_uploads.zip")]
+        for old_file in data_files[10:]:
+            repo.delete_file(old_file.path, "Cleanup old backup", old_file.sha)
+        for old_file in zip_files[10:]:
+            repo.delete_file(old_file.path, "Cleanup old backup", old_file.sha)
+        
+        log_activity('github_backup_success', 'system', f'Backup {timestamp}')
+    except Exception as e:
+        log_activity('github_backup_failed', 'system', str(e)[:200])
+
 def save_data(data):
     tmp = DATA_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, DATA_FILE)
+    
+    # 自动备份到 GitHub（每分钟最多一次）
+    try:
+        if 'last_backup_time' not in st.session_state:
+            st.session_state.last_backup_time = None
+        now = datetime.now()
+        if (st.session_state.last_backup_time is None 
+            or (now - st.session_state.last_backup_time).total_seconds() > 60):
+            backup_to_github(data)
+            st.session_state.last_backup_time = now
+    except Exception as e:
+        log_activity('github_backup_trigger_failed', 'system', str(e)[:200])
 
 def log_activity(action, user_id, detail=""):
     entry = {'time': datetime.now().isoformat(), 'action': action, 'user': user_id, 'detail': detail}
