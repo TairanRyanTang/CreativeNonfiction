@@ -535,11 +535,18 @@ if st.session_state.user_id is None:
 # ---- 已登录学生 ----
 st.success(f"当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
+# 退出登录按钮（放在顶部方便操作）
+if st.button("🚪 退出登录"):
+    st.session_state.user_id = None
+    st.session_state.user_grade = None
+    st.session_state.user_name = None
+    st.session_state.submit_success = False
+    st.rerun()
+
 # ========== 提交成功页面 ==========
 if st.session_state.submit_success:
     st.balloons()
     st.title("🎉 作品提交成功！")
-    # 重新加载最新数据，显示刚提交的信息
     data = load_data()
     user_key = st.session_state.user_id
     my_sub = None
@@ -563,17 +570,14 @@ if st.session_state.submit_success:
     else:
         st.warning("未找到作品记录，请联系管理员")
 
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("✏️ 修改我的作品", type="primary"):
-            st.session_state.submit_success = False
-            st.rerun()
-    with col_btn2:
-        if st.button("👀 查看所有作品（仅限公开）"):
-            st.session_state.submit_success = False
-            # 这里可以跳转，但学生端没有公开列表，简单返回主界面
-            st.rerun()
-    st.stop()  # 阻止后续表单显示
+    # 仅保留“返回登录”按钮
+    if st.button("🔙 返回登录", type="primary"):
+        st.session_state.user_id = None
+        st.session_state.user_grade = None
+        st.session_state.user_name = None
+        st.session_state.submit_success = False
+        st.rerun()
+    st.stop()  # 不再显示后面的表单
 
 # ---- 显示评分（已有作品且有评分） ----
 user_key = st.session_state.user_id
@@ -662,7 +666,7 @@ with st.form("submit_form"):
                     data['submissions'].append(new_sub)
                     save_data(data)
                     log_activity('submit_success', user_key, work_title)
-                    # 设置提交成功标志，下次渲染时显示成功页面
+                    # 设置提交成功标志，跳转成功页面
                     st.session_state.submit_success = True
                     st.rerun()
                 except Exception as e:
