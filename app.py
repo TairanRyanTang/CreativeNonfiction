@@ -184,41 +184,23 @@ def backup_to_github(data):
             st.session_state.backup_msg = "ℹ️ GitHub 未配置，跳过备份"
             return
 
-        g = Github(auth=Auth.Token(token))
-        repo = g.get_repo(repo_name)
-
-        # 生成 ZIP 字节流（路径统一使用正斜杠）
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
-            if os.path.exists(UPLOAD_DIR):
-                for root, dirs, files in os.walk(UPLOAD_DIR):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = 'uploads/' + safe_relpath(file_path, UPLOAD_DIR)
-                        zf.write(file_path, arcname)
-
-        zip_bytes = zip_buffer.getvalue()
-
-        # 验证生成的 ZIP 是否有效
-        try:
-            with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as test_zip:
-                test_zip.testzip()
-        except Exception as e:
-            msg = f"❌ 生成的 ZIP 无效：{str(e)[:100]}"
-            st.session_state.backup_msg = msg
-            return
+        # 直接使用 create_backup_zip 生成与手动下载完全相同的 ZIP 数据
+        zip_bytes = create_backup_zip(data)   # 这个函数已验证过 ZIP 有效性
 
         # base64 编码后上传
         content_b64 = base64.b64encode(zip_bytes).decode()
 
-        # 删除旧缓存（如果存在）
+        g = Github(auth=Auth.Token(token))
+        repo = g.get_repo(repo_name)
+
+        # 删除旧缓存
         try:
             old = repo.get_contents(CACHE_PATH)
             repo.delete_file(old.path, "删除旧缓存", old.sha)
         except:
             pass
 
+        # 上传新缓存
         repo.create_file(CACHE_PATH, f"缓存更新 {datetime.now().isoformat()}", content_b64)
         st.session_state.backup_msg = f"✅ 缓存已更新至 GitHub ({CACHE_PATH})"
         log_activity('github_backup_success', 'system', 'Cache updated')
