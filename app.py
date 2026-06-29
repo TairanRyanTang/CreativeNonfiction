@@ -128,7 +128,6 @@ def restore_from_github():
             return
 
         print("⚠️ 本地数据文件缺失，尝试从 GitHub 恢复...")
-        # 使用新式认证
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
         contents = repo.get_contents("")
@@ -182,7 +181,6 @@ def backup_to_github(data):
             st.session_state.backup_msg = msg
             return
 
-        # 使用新式认证
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
         print(f"📡 已连接仓库: {repo_name}")
@@ -383,7 +381,12 @@ if st.session_state.is_admin:
                 cols = st.columns([2, 2, 2, 1.5, 1, 1, 1])
                 cols[0].write(row.get('student_name', '未知'))
                 cols[1].write(row.get('class_name', '未知'))
-                cols[2].write(row.get('work_title', '未知'))
+                # 作品标题：根据 flagged 字段显示红色
+                title = row.get('work_title', '未知')
+                if row.get('flagged'):
+                    cols[2].markdown(f"<span style='color:red'>{title}</span>", unsafe_allow_html=True)
+                else:
+                    cols[2].write(title)
                 cols[3].write(row.get('time', '')[:16])
                 if row.get('file_path') and os.path.exists(row['file_path']):
                     with open(row['file_path'], 'rb') as f:
@@ -434,17 +437,42 @@ if st.session_state.is_admin:
                 ref = st.number_input("Reflection (0-5)", 0, 5, value=existing_scores.get('reflection', 0))
                 ide = st.number_input("Identity (0-5)", 0, 5, value=existing_scores.get('identity', 0))
                 inti = st.number_input("Intimacy / Authenticity (0-5)", 0, 5, value=existing_scores.get('intimacy', 0))
-                mark = st.text_area("备注", value=sub.get('mark', ''))
+                # 评语已删除，不再有 mark 字段
                 if st.form_submit_button("保存评分"):
                     data = load_data()
                     for s in data['submissions']:
                         if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
                             s['scores'] = {'narration': nar, 'reflection': ref, 'identity': ide, 'intimacy': inti}
-                            s['mark'] = mark
+                            # 保留原有的 flagged 状态
                             break
                     save_data(data)
                     st.success("✅ 评分已保存")
                     st.rerun()
+
+            # 标记待复核按钮（切换状态）
+            st.divider()
+            flagged = sub.get('flagged', False)
+            if flagged:
+                if st.button("✅ 取消标记（已复核）"):
+                    data = load_data()
+                    for s in data['submissions']:
+                        if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
+                            s['flagged'] = False
+                            break
+                    save_data(data)
+                    st.success("已取消标记")
+                    st.rerun()
+            else:
+                if st.button("🚩 标记为待复核"):
+                    data = load_data()
+                    for s in data['submissions']:
+                        if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
+                            s['flagged'] = True
+                            break
+                    save_data(data)
+                    st.success("已标记为待复核")
+                    st.rerun()
+
             if st.button("关闭预览"):
                 st.session_state.preview_idx = None
                 st.rerun()
@@ -588,8 +616,7 @@ if my_sub and my_sub.get('scores'):
     c2.metric("Reflection", f"{scores['reflection']}/5")
     c3.metric("Identity", f"{scores['identity']}/5")
     c4.metric("Intimacy", f"{scores['intimacy']}/5")
-    if my_sub.get('mark'):
-        st.info(f"💬 评语：{my_sub['mark']}")
+    # 评语功能已移除，不再显示 mark
 
 if my_sub:
     st.warning("你已有作品，再次提交将覆盖之前的作品。")
