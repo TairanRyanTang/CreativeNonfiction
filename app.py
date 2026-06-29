@@ -31,6 +31,9 @@ os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
 print("🚀 应用启动，目录已创建")
 
+if 'backup_msg' not in st.session_state:
+    st.session_state.backup_msg = ""
+
 # ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
     errors = []
@@ -192,7 +195,9 @@ def backup_to_github(data):
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
-            print("ℹ️ GitHub 未配置，跳过备份")
+            msg = "ℹ️ GitHub 未配置，跳过备份"
+            print(msg)
+            st.session_state.backup_msg = msg
             return
 
         g = Github(token)
@@ -243,9 +248,16 @@ def backup_to_github(data):
         print("✅ 清理完成")
 
         log_activity('github_backup_success', 'system', f'Backup {timestamp}')
+
+        
+        msg = f"✅ 备份成功：{data_filename} + {zip_filename if uploads_zip_bytes else '无文件'}"
+        print(msg)
+        st.session_state.backup_msg = msg
+        
     except Exception as e:
-        print(f"❌ backup_to_github 失败: {str(e)[:200]}")
-        log_activity('github_backup_failed', 'system', str(e)[:200])
+        msg = f"❌ 备份失败：{str(e)[:200]}"
+        print(msg)
+        st.session_state.backup_msg = msg
 
 def save_data(data):
     print("💾 save_data: 保存数据到本地...")
