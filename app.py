@@ -112,65 +112,62 @@ def log_activity(action, user_id, detail=""):
 def get_user_key(grade, name):
     return f"{grade}_{name}".strip()
 
-# ---------- GitHub 自动备份与恢复 ----------
+# ---------- GitHub 备份与恢复（缓存模式） ----------
+CACHE_PATH = "cache/backup_latest.zip"  # 固定缓存路径
+
 def restore_from_github():
-    print("🔍 restore_from_github: 开始检查是否需要恢复数据...")
+    """从 GitHub 缓存中恢复数据（ZIP 格式）"""
+    print("🔍 restore_from_github: 检查是否需要从 GitHub 缓存恢复...")
     try:
         from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
-            print("ℹ️ 未配置 GitHub 备份，跳过恢复")
+            print("ℹ️ 未配置 GitHub，跳过恢复")
             return
 
         if os.path.exists(DATA_FILE):
-            print(f"✅ 本地数据文件 {DATA_FILE} 已存在，无需恢复")
+            print("✅ 本地数据已存在，无需恢复")
             return
 
-        print("⚠️ 本地数据文件缺失，尝试从 GitHub 恢复...")
+        print("⚠️ 本地数据缺失，尝试从 GitHub 缓存恢复...")
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
-        contents = repo.get_contents("")
-        data_files = []
-        zip_files = []
-        for c in contents:
-            if c.name.startswith("backup_") and c.name.endswith("_data.json"):
-                data_files.append(c)
-            elif c.name.startswith("backup_") and c.name.endswith("_uploads.zip"):
-                zip_files.append(c)
 
-        if not data_files:
-            print("❌ 没有任何备份文件，无法恢复")
-            return
+        try:
+            # 获取缓存文件
+            contents = repo.get_contents(CACHE_PATH)
+            zip_bytes = base64.b64decode(contents.content)
+            print(f"📦 找到缓存文件: {CACHE_PATH}")
 
-        data_files.sort(key=lambda x: x.name, reverse=True)
-        zip_files.sort(key=lambda x: x.name, reverse=True)
-
-        latest_data = data_files[0]
-        data_content = base64.b64decode(latest_data.content).decode('utf-8')
-        new_data = json.loads(data_content)
-        if 'submissions' in new_data and 'users' in new_data:
-            with open(DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump(new_data, f, ensure_ascii=False, indent=2)
-            print(f"✅ data.json 已写入，包含 {len(new_data['submissions'])} 个作品")
-            log_activity('github_restore_data', 'system', f'Restored {latest_data.name}')
-        else:
-            raise ValueError("data.json 格式不正确")
-
-        if zip_files:
-            if not os.path.exists(UPLOAD_DIR):
-                os.makedirs(UPLOAD_DIR, exist_ok=True)
-            latest_zip = zip_files[0]
-            zip_bytes = base64.b64decode(latest_zip.content)
+            # 解压 ZIP
             with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-                zf.extractall(UPLOAD_DIR)
-            log_activity('github_restore_uploads', 'system', f'Restored {latest_zip.name}')
+                # 恢复 data.json
+                if 'data.json' in zf.namelist():
+                    zf.extract('data.json', '/tmp')
+                    print("✅ data.json 已恢复")
+                else:
+                    raise ValueError("缓存中缺少 data.json")
+
+                # 恢复 uploads 目录
+                if os.path.exists(UPLOAD_DIR):
+                    shutil.rmtree(UPLOAD_DIR)
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+                for member in zf.namelist():
+                    if member.startswith('uploads/') and not member.endswith('/'):
+                        zf.extract(member, '/tmp')
+                print("✅ uploads 已恢复")
+
+            log_activity('github_restore_success', 'system', 'Restored from cache')
+        except Exception as e:
+            print(f"❌ 恢复失败: {str(e)[:200]}")
+            log_activity('github_restore_failed', 'system', str(e)[:200])
     except Exception as e:
-        print(f"❌ restore_from_github 失败: {str(e)[:200]}")
-        log_activity('github_restore_failed', 'system', str(e)[:200])
+        print(f"❌ restore_from_github 异常: {str(e)[:200]}")
 
 def backup_to_github(data):
-    print("🔄 backup_to_github: 开始备份...")
+    """生成最新数据 ZIP 并上传到 GitHub cache/ 目录，删除旧缓存"""
+    print("🔄 backup_to_github: 开始缓存备份...")
     try:
         from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
@@ -183,73 +180,51 @@ def backup_to_github(data):
 
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
-        print(f"📡 已连接仓库: {repo_name}")
 
-        json_str = json.dumps(data, ensure_ascii=False, indent=2)
-        uploads_zip_bytes = None
-        if os.path.exists(UPLOAD_DIR) and os.listdir(UPLOAD_DIR):
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # 1. 打包 data.json 和 uploads 目录为 ZIP
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # 写入 data.json
+            zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
+            # 写入 uploads 目录所有文件
+            if os.path.exists(UPLOAD_DIR):
                 for root, dirs, files in os.walk(UPLOAD_DIR):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        zf.write(file_path, file)
-            uploads_zip_bytes = zip_buffer.getvalue()
+                        arcname = os.path.join('uploads', os.path.relpath(file_path, UPLOAD_DIR))
+                        zf.write(file_path, arcname)
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        data_filename = f"backup_{timestamp}_data.json"
-        repo.create_file(data_filename, f"Backup data at {timestamp}", json_str)
+        zip_content = zip_buffer.getvalue()
+        content_b64 = base64.b64encode(zip_content).decode()
 
-        zip_filename = None
-        if uploads_zip_bytes:
-            content_b64 = base64.b64encode(uploads_zip_bytes).decode()
-            zip_filename = f"backup_{timestamp}_uploads.zip"
-            repo.create_file(zip_filename, f"Backup uploads at {timestamp}", content_b64)
+        # 2. 删除旧缓存（如果存在）
+        try:
+            old = repo.get_contents(CACHE_PATH)
+            repo.delete_file(old.path, "删除旧缓存", old.sha)
+            print("🗑️ 已删除旧缓存文件")
+        except:
+            print("ℹ️ 无旧缓存需要删除")
 
-        # 清理旧备份（保留最近10个）
-        contents = repo.get_contents("")
-        backup_files = [c for c in contents if c.name.startswith("backup_")]
-        backup_files.sort(key=lambda x: x.name, reverse=True)
-        data_files = [f for f in backup_files if f.name.endswith("_data.json")]
-        zip_files = [f for f in backup_files if f.name.endswith("_uploads.zip")]
-        for old_file in data_files[10:]:
-            repo.delete_file(old_file.path, "Cleanup old backup", old_file.sha)
-        for old_file in zip_files[10:]:
-            repo.delete_file(old_file.path, "Cleanup old backup", old_file.sha)
-
-        msg = f"✅ 备份成功：{data_filename}"
-        if zip_filename:
-            msg += f" + {zip_filename}"
+        # 3. 上传新缓存
+        repo.create_file(CACHE_PATH, f"缓存备份 {datetime.now().isoformat()}", content_b64)
+        msg = f"✅ 缓存已更新至 GitHub ({CACHE_PATH})"
         print(msg)
         st.session_state.backup_msg = msg
-        log_activity('github_backup_success', 'system', f'Backup {timestamp}')
+        log_activity('github_backup_success', 'system', 'Cache updated')
     except Exception as e:
-        msg = f"❌ 备份失败：{str(e)[:200]}"
+        msg = f"❌ 缓存备份失败：{str(e)[:200]}"
         print(msg)
         st.session_state.backup_msg = msg
         log_activity('github_backup_failed', 'system', str(e)[:200])
 
 def save_data(data):
+    """保存数据到本地 JSON，不再自动触发备份"""
     print("💾 save_data: 保存数据到本地...")
     tmp = DATA_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, DATA_FILE)
-    print(f"✅ 数据已写入 {DATA_FILE}")
-
-    # 自动备份到 GitHub（每分钟最多一次）
-    try:
-        if 'last_backup_time' not in st.session_state:
-            st.session_state.last_backup_time = None
-        now = datetime.now()
-        if (st.session_state.last_backup_time is None
-            or (now - st.session_state.last_backup_time).total_seconds() > 60):
-            backup_to_github(data)
-            st.session_state.last_backup_time = now
-        else:
-            st.session_state.backup_msg = "⏳ 距上次备份不足60秒，跳过自动备份"
-    except Exception as e:
-        st.session_state.backup_msg = f"❌ 自动备份触发异常：{str(e)[:100]}"
+    print("✅ 数据已写入本地")
 
 # ---------- 手动备份/恢复（下载/上传） ----------
 def create_backup_zip(data):
@@ -351,11 +326,11 @@ if st.session_state.is_admin:
                 except Exception as e:
                     st.error(f"❌ 恢复失败：{str(e)}")
 
-    # 手动备份到 GitHub
+    # 手动备份到 GitHub（现在改为立即更新缓存）
     st.divider()
-    st.subheader("☁️ 手动备份到 GitHub")
-    if st.button("📤 立即备份到 GitHub 仓库"):
-        with st.spinner("正在上传备份到 GitHub..."):
+    st.subheader("☁️ 手动更新 GitHub 缓存")
+    if st.button("📤 立即更新缓存到 GitHub"):
+        with st.spinner("正在更新缓存..."):
             backup_to_github(data)
         if "✅" in st.session_state.backup_msg:
             st.success(st.session_state.backup_msg)
@@ -363,7 +338,7 @@ if st.session_state.is_admin:
             st.error(st.session_state.backup_msg)
         else:
             st.info(st.session_state.backup_msg)
-    st.caption(f"最近备份状态：{st.session_state.backup_msg}")
+    st.caption(f"最近缓存状态：{st.session_state.backup_msg}")
 
     st.divider()
 
@@ -381,7 +356,6 @@ if st.session_state.is_admin:
                 cols = st.columns([2, 2, 2, 1.5, 1, 1, 1])
                 cols[0].write(row.get('student_name', '未知'))
                 cols[1].write(row.get('class_name', '未知'))
-                # 作品标题：根据 flagged 字段显示红色
                 title = row.get('work_title', '未知')
                 if row.get('flagged'):
                     cols[2].markdown(f"<span style='color:red'>{title}</span>", unsafe_allow_html=True)
@@ -437,19 +411,18 @@ if st.session_state.is_admin:
                 ref = st.number_input("Reflection (0-5)", 0, 5, value=existing_scores.get('reflection', 0))
                 ide = st.number_input("Identity (0-5)", 0, 5, value=existing_scores.get('identity', 0))
                 inti = st.number_input("Intimacy / Authenticity (0-5)", 0, 5, value=existing_scores.get('intimacy', 0))
-                # 评语已删除，不再有 mark 字段
                 if st.form_submit_button("保存评分"):
                     data = load_data()
                     for s in data['submissions']:
                         if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
                             s['scores'] = {'narration': nar, 'reflection': ref, 'identity': ide, 'intimacy': inti}
-                            # 保留原有的 flagged 状态
                             break
                     save_data(data)
+                    backup_to_github(data)  # 评分时缓存
                     st.success("✅ 评分已保存")
                     st.rerun()
 
-            # 标记待复核按钮（切换状态）
+            # 标记待复核
             st.divider()
             flagged = sub.get('flagged', False)
             if flagged:
@@ -460,6 +433,7 @@ if st.session_state.is_admin:
                             s['flagged'] = False
                             break
                     save_data(data)
+                    backup_to_github(data)  # 标记操作时缓存
                     st.success("已取消标记")
                     st.rerun()
             else:
@@ -470,6 +444,7 @@ if st.session_state.is_admin:
                             s['flagged'] = True
                             break
                     save_data(data)
+                    backup_to_github(data)
                     st.success("已标记为待复核")
                     st.rerun()
 
@@ -501,6 +476,7 @@ if st.session_state.is_admin:
                 os.makedirs(UPLOAD_DIR, exist_ok=True)
             data['submissions'] = []
             save_data(data)
+            backup_to_github(data)  # 清空时也缓存
             log_activity('admin_delete_all', 'admin', 'All deleted')
             st.success("✅ 已清空")
             st.rerun()
@@ -538,6 +514,7 @@ if st.session_state.user_id is None:
                     st.session_state.user_grade = grade
                     st.session_state.user_name = name
                     log_activity('login', user_key)
+                    # 登录不触发备份
                     st.success(f"欢迎回来，{name}！")
                     st.rerun()
                 else:
@@ -545,6 +522,7 @@ if st.session_state.user_id is None:
             else:
                 users[user_key] = hash_password(password)
                 save_data(data)
+                backup_to_github(data)  # 新用户注册时备份
                 st.session_state.user_id = user_key
                 st.session_state.user_grade = grade
                 st.session_state.user_name = name
@@ -598,7 +576,7 @@ if st.session_state.submit_success:
         st.rerun()
     st.stop()
 
-# 显示评分（已有作品且有评分）
+# 显示评分
 user_key = st.session_state.user_id
 my_sub = None
 for s in data['submissions']:
@@ -616,7 +594,6 @@ if my_sub and my_sub.get('scores'):
     c2.metric("Reflection", f"{scores['reflection']}/5")
     c3.metric("Identity", f"{scores['identity']}/5")
     c4.metric("Intimacy", f"{scores['intimacy']}/5")
-    # 评语功能已移除，不再显示 mark
 
 if my_sub:
     st.warning("你已有作品，再次提交将覆盖之前的作品。")
@@ -657,14 +634,12 @@ with st.form("submit_form"):
             else:
                 try:
                     data = load_data()
-                    # 删除旧文件
                     for i, s in enumerate(data['submissions']):
                         if s['user_key'] == user_key:
                             if s.get('file_path') and os.path.exists(s['file_path']):
                                 os.remove(s['file_path'])
                             data['submissions'].pop(i)
                             break
-                    # 保存新文件
                     fname = safe_filename(uploaded_file.name, user_key)
                     fpath = os.path.join(UPLOAD_DIR, fname)
                     with open(fpath, 'wb') as f:
@@ -681,19 +656,20 @@ with st.form("submit_form"):
                     }
                     data['submissions'].append(new_sub)
                     save_data(data)
+                    backup_to_github(data)  # 提交作品时缓存
                     log_activity('submit_success', user_key, work_title)
                     st.session_state.submit_success = True
                     st.rerun()
                 except Exception as e:
                     st.error(f"提交异常：{str(e)[:100]}")
 
-# 侧边栏（显示备份状态）
+# 侧边栏
 st.sidebar.divider()
-st.sidebar.caption("📦 GitHub 备份状态：")
+st.sidebar.caption("📦 GitHub 缓存状态：")
 if st.session_state.backup_msg:
     st.sidebar.info(st.session_state.backup_msg)
 else:
-    st.sidebar.caption("暂无备份记录")
+    st.sidebar.caption("暂无缓存记录")
 st.sidebar.divider()
 st.sidebar.caption("🔒 安全特性：")
 st.sidebar.caption("- 仅接受Word文档 (.doc/.docx)")
