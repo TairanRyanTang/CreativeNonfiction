@@ -29,7 +29,6 @@ os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
 # ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
-    # ... 保持不变 ...
     errors = []
     if filename.lower().endswith('.docx'):
         if file_content[:4] != b'PK\x03\x04':
@@ -56,7 +55,6 @@ def scan_word_document(file_content, filename):
 
 # ---------- docx 文本提取 ----------
 def extract_text_from_docx(file_content):
-    # ... 保持不变 ...
     try:
         text_parts = []
         with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
@@ -142,15 +140,16 @@ def restore_from_github():
         except Exception as e:
             return "❌ 未找到缓存文件，无法自动恢复"
 
-        # 使用 decoded_content 直接获取原始字节（避免手动解码错误）
-        zip_bytes = contents.decoded_content
+        # 手动从 base64 解码（避免 decoded_content 损坏二进制数据）
+        zip_b64 = contents.content
+        zip_bytes = base64.b64decode(zip_b64)
+
         with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-            # 恢复 data.json
             if 'data.json' not in zf.namelist():
                 return "❌ 缓存中缺少 data.json"
+            # 恢复 data.json
             with zf.open('data.json') as source, open(DATA_FILE, 'wb') as target:
                 shutil.copyfileobj(source, target)
-            # 验证格式
             try:
                 with open(DATA_FILE, 'r', encoding='utf-8') as f:
                     json.load(f)
@@ -188,7 +187,7 @@ def backup_to_github(data):
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
 
-        # 生成 ZIP 字节流（强制使用正斜杠路径）
+        # 生成 ZIP 字节流（路径统一使用正斜杠）
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
@@ -204,13 +203,13 @@ def backup_to_github(data):
         # 验证生成的 ZIP 是否有效
         try:
             with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as test_zip:
-                test_zip.testzip()  # 检查完整性
+                test_zip.testzip()
         except Exception as e:
             msg = f"❌ 生成的 ZIP 无效：{str(e)[:100]}"
             st.session_state.backup_msg = msg
             return
 
-        # 手动 base64 编码后上传（PyGithub 要求字符串）
+        # base64 编码后上传
         content_b64 = base64.b64encode(zip_bytes).decode()
 
         # 删除旧缓存（如果存在）
@@ -220,7 +219,6 @@ def backup_to_github(data):
         except:
             pass
 
-        # 上传新缓存
         repo.create_file(CACHE_PATH, f"缓存更新 {datetime.now().isoformat()}", content_b64)
         st.session_state.backup_msg = f"✅ 缓存已更新至 GitHub ({CACHE_PATH})"
         log_activity('github_backup_success', 'system', 'Cache updated')
@@ -317,13 +315,11 @@ if st.session_state.is_admin:
     st.success("🔓 管理员模式")
     data = load_data()
 
-    # 显示恢复状态
     if st.session_state.restore_msg:
         if "✅" in st.session_state.restore_msg:
             st.success(st.session_state.restore_msg)
         else:
             st.warning(st.session_state.restore_msg)
-        # 只显示一次
         st.session_state.restore_msg = ""
 
     # 备份与恢复区域
@@ -451,7 +447,6 @@ if st.session_state.is_admin:
                     st.success("✅ 评分已保存")
                     st.rerun()
 
-            # 标记待复核
             st.divider()
             flagged = sub.get('flagged', False)
             if flagged:
@@ -481,7 +476,6 @@ if st.session_state.is_admin:
                 st.session_state.preview_idx = None
                 st.rerun()
 
-    # 隔离区与日志
     with st.expander("⚠️ 隔离文件列表"):
         if os.path.exists(VIRUS_SCAN_DIR):
             vfs = os.listdir(VIRUS_SCAN_DIR)
@@ -494,7 +488,6 @@ if st.session_state.is_admin:
     with st.expander("📋 最近日志（控制台输出）"):
         st.write("请查看 Streamlit Cloud 的 'Manage app' → 'Logs' 获取详细日志")
 
-    # 危险操作：清空所有
     st.divider()
     st.error("🧹 危险操作区")
     confirm = st.checkbox("⚠️ 我确认要删除所有作品及文件，此操作不可恢复")
@@ -559,7 +552,6 @@ if st.session_state.user_id is None:
                 st.rerun()
     st.stop()
 
-# 已登录学生
 st.success(f"当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
 if st.button("🚪 退出登录"):
@@ -569,7 +561,6 @@ if st.button("🚪 退出登录"):
     st.session_state.submit_success = False
     st.rerun()
 
-# 提交成功页面
 if st.session_state.submit_success:
     st.balloons()
     st.title("🎉 作品提交成功！")
@@ -604,7 +595,6 @@ if st.session_state.submit_success:
         st.rerun()
     st.stop()
 
-# 显示评分
 user_key = st.session_state.user_id
 my_sub = None
 for s in data['submissions']:
