@@ -693,3 +693,9 @@ st.sidebar.caption("- 恶意代码检测")
 st.sidebar.caption("- 危险文件自动隔离")
 st.sidebar.caption("- 文件大小限制 (20MB)")
 st.sidebar.caption("- 提交可覆盖，以最新为准")
+st.sidebar.divider()
+st.sidebar.caption("📦 备份状态：")
+if st.session_state.backup_msg:
+    st.sidebar.info(st.session_state.backup_msg)
+else:
+    st.sidebar.caption("暂无备份记录")
