@@ -113,80 +113,83 @@ def get_user_key(grade, name):
     return f"{grade}_{name}".strip()
 
 # ---------- GitHub 备份与恢复（缓存模式） ----------
-CACHE_PATH = "cache/backup_latest.zip"  # 固定缓存路径
+CACHE_PATH = "cache/backup_latest.zip"
 
 def restore_from_github():
-    """从 GitHub 缓存中恢复数据（ZIP 格式）"""
-    print("🔍 restore_from_github: 检查是否需要从 GitHub 缓存恢复...")
+    """从 GitHub 缓存恢复数据，返回状态消息"""
+    msg = ""
     try:
         from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
-            print("ℹ️ 未配置 GitHub，跳过恢复")
-            return
+            return "ℹ️ GitHub 未配置，跳过恢复"
 
         if os.path.exists(DATA_FILE):
-            print("✅ 本地数据已存在，无需恢复")
-            return
+            return "✅ 本地数据已存在，无需恢复"
 
-        print("⚠️ 本地数据缺失，尝试从 GitHub 缓存恢复...")
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
 
         try:
-            # 获取缓存文件
             contents = repo.get_contents(CACHE_PATH)
-            zip_bytes = base64.b64decode(contents.content)
-            print(f"📦 找到缓存文件: {CACHE_PATH}")
-
-            # 解压 ZIP
-            with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-                # 恢复 data.json
-                if 'data.json' in zf.namelist():
-                    zf.extract('data.json', '/tmp')
-                    print("✅ data.json 已恢复")
-                else:
-                    raise ValueError("缓存中缺少 data.json")
-
-                # 恢复 uploads 目录
-                if os.path.exists(UPLOAD_DIR):
-                    shutil.rmtree(UPLOAD_DIR)
-                os.makedirs(UPLOAD_DIR, exist_ok=True)
-                for member in zf.namelist():
-                    if member.startswith('uploads/') and not member.endswith('/'):
-                        zf.extract(member, '/tmp')
-                print("✅ uploads 已恢复")
-
-            log_activity('github_restore_success', 'system', 'Restored from cache')
         except Exception as e:
-            print(f"❌ 恢复失败: {str(e)[:200]}")
-            log_activity('github_restore_failed', 'system', str(e)[:200])
+            return "❌ 未找到缓存文件，无法自动恢复"
+
+        zip_bytes = base64.b64decode(contents.content)
+
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+            # 恢复 data.json
+            if 'data.json' in zf.namelist():
+                with zf.open('data.json') as source, open(DATA_FILE, 'wb') as target:
+                    shutil.copyfileobj(source, target)
+                # 验证格式
+                try:
+                    with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                        json.load(f)
+                except:
+                    os.remove(DATA_FILE)
+                    return "❌ 缓存中 data.json 损坏"
+            else:
+                return "❌ 缓存中缺少 data.json"
+
+            # 恢复 uploads 目录
+            if os.path.exists(UPLOAD_DIR):
+                shutil.rmtree(UPLOAD_DIR)
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+            for member in zf.namelist():
+                if member.startswith('uploads/') and not member.endswith('/'):
+                    target_path = os.path.join('/tmp', member)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with zf.open(member) as source, open(target_path, 'wb') as target:
+                        shutil.copyfileobj(source, target)
+
+        msg = "✅ 数据已从 GitHub 缓存恢复"
+        log_activity('github_restore_success', 'system', 'Restored from cache')
     except Exception as e:
-        print(f"❌ restore_from_github 异常: {str(e)[:200]}")
+        msg = f"❌ 恢复失败：{str(e)[:100]}"
+        log_activity('github_restore_failed', 'system', str(e)[:200])
+    return msg
 
 def backup_to_github(data):
-    """生成最新数据 ZIP 并上传到 GitHub cache/ 目录，删除旧缓存"""
-    print("🔄 backup_to_github: 开始缓存备份...")
+    """生成缓存 ZIP 并上传到 GitHub（覆盖旧缓存）"""
     try:
         from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
             msg = "ℹ️ GitHub 未配置，跳过备份"
-            print(msg)
             st.session_state.backup_msg = msg
             return
 
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
 
-        # 1. 打包 data.json 和 uploads 目录为 ZIP
+        # 打包 ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # 写入 data.json
             zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
-            # 写入 uploads 目录所有文件
             if os.path.exists(UPLOAD_DIR):
                 for root, dirs, files in os.walk(UPLOAD_DIR):
                     for file in files:
@@ -194,37 +197,31 @@ def backup_to_github(data):
                         arcname = os.path.join('uploads', os.path.relpath(file_path, UPLOAD_DIR))
                         zf.write(file_path, arcname)
 
-        zip_content = zip_buffer.getvalue()
-        content_b64 = base64.b64encode(zip_content).decode()
+        content_b64 = base64.b64encode(zip_buffer.getvalue()).decode()
 
-        # 2. 删除旧缓存（如果存在）
+        # 删除旧缓存
         try:
             old = repo.get_contents(CACHE_PATH)
             repo.delete_file(old.path, "删除旧缓存", old.sha)
-            print("🗑️ 已删除旧缓存文件")
         except:
-            print("ℹ️ 无旧缓存需要删除")
+            pass
 
-        # 3. 上传新缓存
-        repo.create_file(CACHE_PATH, f"缓存备份 {datetime.now().isoformat()}", content_b64)
+        # 上传新缓存
+        repo.create_file(CACHE_PATH, f"缓存更新 {datetime.now().isoformat()}", content_b64)
         msg = f"✅ 缓存已更新至 GitHub ({CACHE_PATH})"
-        print(msg)
         st.session_state.backup_msg = msg
         log_activity('github_backup_success', 'system', 'Cache updated')
     except Exception as e:
         msg = f"❌ 缓存备份失败：{str(e)[:200]}"
-        print(msg)
         st.session_state.backup_msg = msg
         log_activity('github_backup_failed', 'system', str(e)[:200])
 
 def save_data(data):
-    """保存数据到本地 JSON，不再自动触发备份"""
-    print("💾 save_data: 保存数据到本地...")
+    """仅保存到本地"""
     tmp = DATA_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, DATA_FILE)
-    print("✅ 数据已写入本地")
 
 # ---------- 手动备份/恢复（下载/上传） ----------
 def create_backup_zip(data):
@@ -263,8 +260,10 @@ def restore_backup_zip(zip_bytes):
             json.dump(new_data, f, ensure_ascii=False, indent=2)
     return True
 
-# ---------- 应用启动时自动恢复 ----------
-restore_from_github()
+# ---------- 启动时恢复，并记录状态 ----------
+restore_msg = restore_from_github()
+if 'restore_msg' not in st.session_state:
+    st.session_state.restore_msg = restore_msg
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="比赛作品提交系统", page_icon="🔒")
@@ -300,6 +299,15 @@ if st.session_state.is_admin:
     st.success("🔓 管理员模式")
     data = load_data()
 
+    # 显示恢复状态（如果刚恢复）
+    if st.session_state.restore_msg:
+        if "✅" in st.session_state.restore_msg:
+            st.success(st.session_state.restore_msg)
+        else:
+            st.warning(st.session_state.restore_msg)
+        # 只显示一次
+        st.session_state.restore_msg = ""
+
     # 备份与恢复区域
     st.subheader("💾 数据备份与恢复")
     col_bkp1, col_bkp2 = st.columns(2)
@@ -326,7 +334,7 @@ if st.session_state.is_admin:
                 except Exception as e:
                     st.error(f"❌ 恢复失败：{str(e)}")
 
-    # 手动备份到 GitHub（现在改为立即更新缓存）
+    # 手动更新 GitHub 缓存
     st.divider()
     st.subheader("☁️ 手动更新 GitHub 缓存")
     if st.button("📤 立即更新缓存到 GitHub"):
@@ -433,7 +441,7 @@ if st.session_state.is_admin:
                             s['flagged'] = False
                             break
                     save_data(data)
-                    backup_to_github(data)  # 标记操作时缓存
+                    backup_to_github(data)
                     st.success("已取消标记")
                     st.rerun()
             else:
@@ -476,7 +484,7 @@ if st.session_state.is_admin:
                 os.makedirs(UPLOAD_DIR, exist_ok=True)
             data['submissions'] = []
             save_data(data)
-            backup_to_github(data)  # 清空时也缓存
+            backup_to_github(data)
             log_activity('admin_delete_all', 'admin', 'All deleted')
             st.success("✅ 已清空")
             st.rerun()
@@ -514,7 +522,6 @@ if st.session_state.user_id is None:
                     st.session_state.user_grade = grade
                     st.session_state.user_name = name
                     log_activity('login', user_key)
-                    # 登录不触发备份
                     st.success(f"欢迎回来，{name}！")
                     st.rerun()
                 else:
@@ -522,7 +529,7 @@ if st.session_state.user_id is None:
             else:
                 users[user_key] = hash_password(password)
                 save_data(data)
-                backup_to_github(data)  # 新用户注册时备份
+                backup_to_github(data)  # 新注册时缓存
                 st.session_state.user_id = user_key
                 st.session_state.user_grade = grade
                 st.session_state.user_name = name
@@ -656,14 +663,20 @@ with st.form("submit_form"):
                     }
                     data['submissions'].append(new_sub)
                     save_data(data)
-                    backup_to_github(data)  # 提交作品时缓存
+                    backup_to_github(data)  # 提交时缓存
                     log_activity('submit_success', user_key, work_title)
                     st.session_state.submit_success = True
                     st.rerun()
                 except Exception as e:
                     st.error(f"提交异常：{str(e)[:100]}")
 
-# 侧边栏
+# 侧边栏（恢复与缓存状态）
+st.sidebar.divider()
+st.sidebar.caption("🔄 启动恢复状态：")
+if 'restore_msg' in st.session_state and st.session_state.restore_msg:
+    st.sidebar.info(st.session_state.restore_msg)
+else:
+    st.sidebar.caption("无自动恢复记录")
 st.sidebar.divider()
 st.sidebar.caption("📦 GitHub 缓存状态：")
 if st.session_state.backup_msg:
