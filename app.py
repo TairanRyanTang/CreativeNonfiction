@@ -29,6 +29,7 @@ os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
 # ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
+    # ... 保持不变 ...
     errors = []
     if filename.lower().endswith('.docx'):
         if file_content[:4] != b'PK\x03\x04':
@@ -55,6 +56,7 @@ def scan_word_document(file_content, filename):
 
 # ---------- docx 文本提取 ----------
 def extract_text_from_docx(file_content):
+    # ... 保持不变 ...
     try:
         text_parts = []
         with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
@@ -112,11 +114,15 @@ def log_activity(action, user_id, detail=""):
 def get_user_key(grade, name):
     return f"{grade}_{name}".strip()
 
+# 生成安全的 ZIP 内部路径（统一使用正斜杠）
+def safe_relpath(file_path, base_dir):
+    rel = os.path.relpath(file_path, base_dir)
+    return rel.replace(os.sep, '/')
+
 # ---------- GitHub 备份与恢复（缓存模式） ----------
 CACHE_PATH = "cache/backup_latest.zip"
 
 def restore_from_github():
-    """从 GitHub 缓存恢复数据，返回状态消息"""
     msg = ""
     try:
         from github import Github, Auth
@@ -136,31 +142,29 @@ def restore_from_github():
         except Exception as e:
             return "❌ 未找到缓存文件，无法自动恢复"
 
-        zip_bytes = base64.b64decode(contents.content)
-
+        # 使用 decoded_content 直接获取原始字节（避免手动解码错误）
+        zip_bytes = contents.decoded_content
         with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
             # 恢复 data.json
-            if 'data.json' in zf.namelist():
-                with zf.open('data.json') as source, open(DATA_FILE, 'wb') as target:
-                    shutil.copyfileobj(source, target)
-                # 验证格式
-                try:
-                    with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                        json.load(f)
-                except:
-                    os.remove(DATA_FILE)
-                    return "❌ 缓存中 data.json 损坏"
-            else:
+            if 'data.json' not in zf.namelist():
                 return "❌ 缓存中缺少 data.json"
+            with zf.open('data.json') as source, open(DATA_FILE, 'wb') as target:
+                shutil.copyfileobj(source, target)
+            # 验证格式
+            try:
+                with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                    json.load(f)
+            except:
+                os.remove(DATA_FILE)
+                return "❌ 缓存中 data.json 损坏"
 
             # 恢复 uploads 目录
             if os.path.exists(UPLOAD_DIR):
                 shutil.rmtree(UPLOAD_DIR)
             os.makedirs(UPLOAD_DIR, exist_ok=True)
-
             for member in zf.namelist():
                 if member.startswith('uploads/') and not member.endswith('/'):
-                    target_path = os.path.join('/tmp', member)
+                    target_path = os.path.join('/tmp', member.replace('/', os.sep))
                     os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     with zf.open(member) as source, open(target_path, 'wb') as target:
                         shutil.copyfileobj(source, target)
@@ -173,20 +177,18 @@ def restore_from_github():
     return msg
 
 def backup_to_github(data):
-    """生成缓存 ZIP 并上传到 GitHub（覆盖旧缓存）"""
     try:
         from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
-            msg = "ℹ️ GitHub 未配置，跳过备份"
-            st.session_state.backup_msg = msg
+            st.session_state.backup_msg = "ℹ️ GitHub 未配置，跳过备份"
             return
 
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
 
-        # 打包 ZIP
+        # 生成 ZIP 字节流（强制使用正斜杠路径）
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
@@ -194,12 +196,24 @@ def backup_to_github(data):
                 for root, dirs, files in os.walk(UPLOAD_DIR):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arcname = os.path.join('uploads', os.path.relpath(file_path, UPLOAD_DIR))
+                        arcname = 'uploads/' + safe_relpath(file_path, UPLOAD_DIR)
                         zf.write(file_path, arcname)
 
-        content_b64 = base64.b64encode(zip_buffer.getvalue()).decode()
+        zip_bytes = zip_buffer.getvalue()
 
-        # 删除旧缓存
+        # 验证生成的 ZIP 是否有效
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as test_zip:
+                test_zip.testzip()  # 检查完整性
+        except Exception as e:
+            msg = f"❌ 生成的 ZIP 无效：{str(e)[:100]}"
+            st.session_state.backup_msg = msg
+            return
+
+        # 手动 base64 编码后上传（PyGithub 要求字符串）
+        content_b64 = base64.b64encode(zip_bytes).decode()
+
+        # 删除旧缓存（如果存在）
         try:
             old = repo.get_contents(CACHE_PATH)
             repo.delete_file(old.path, "删除旧缓存", old.sha)
@@ -208,16 +222,13 @@ def backup_to_github(data):
 
         # 上传新缓存
         repo.create_file(CACHE_PATH, f"缓存更新 {datetime.now().isoformat()}", content_b64)
-        msg = f"✅ 缓存已更新至 GitHub ({CACHE_PATH})"
-        st.session_state.backup_msg = msg
+        st.session_state.backup_msg = f"✅ 缓存已更新至 GitHub ({CACHE_PATH})"
         log_activity('github_backup_success', 'system', 'Cache updated')
     except Exception as e:
-        msg = f"❌ 缓存备份失败：{str(e)[:200]}"
-        st.session_state.backup_msg = msg
+        st.session_state.backup_msg = f"❌ 缓存备份失败：{str(e)[:200]}"
         log_activity('github_backup_failed', 'system', str(e)[:200])
 
 def save_data(data):
-    """仅保存到本地"""
     tmp = DATA_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -232,9 +243,16 @@ def create_backup_zip(data):
             for root, dirs, files in os.walk(UPLOAD_DIR):
                 for file in files:
                     file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, UPLOAD_DIR)
-                    zf.write(file_path, os.path.join('uploads', arcname))
-    return zip_buffer.getvalue()
+                    arcname = 'uploads/' + safe_relpath(file_path, UPLOAD_DIR)
+                    zf.write(file_path, arcname)
+    zip_bytes = zip_buffer.getvalue()
+    # 验证 ZIP 可读
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as test_zip:
+            test_zip.testzip()
+    except Exception as e:
+        raise RuntimeError(f"生成的备份 ZIP 无效：{str(e)}")
+    return zip_bytes
 
 def restore_backup_zip(zip_bytes):
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
@@ -252,7 +270,7 @@ def restore_backup_zip(zip_bytes):
                 continue
             if not member.startswith('uploads/'):
                 continue
-            target_path = os.path.join('/tmp', member)
+            target_path = os.path.join('/tmp', member.replace('/', os.sep))
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             with zf.open(member) as source, open(target_path, 'wb') as target:
                 shutil.copyfileobj(source, target)
@@ -260,7 +278,7 @@ def restore_backup_zip(zip_bytes):
             json.dump(new_data, f, ensure_ascii=False, indent=2)
     return True
 
-# ---------- 启动时恢复，并记录状态 ----------
+# ---------- 启动时自动恢复 ----------
 restore_msg = restore_from_github()
 if 'restore_msg' not in st.session_state:
     st.session_state.restore_msg = restore_msg
@@ -299,7 +317,7 @@ if st.session_state.is_admin:
     st.success("🔓 管理员模式")
     data = load_data()
 
-    # 显示恢复状态（如果刚恢复）
+    # 显示恢复状态
     if st.session_state.restore_msg:
         if "✅" in st.session_state.restore_msg:
             st.success(st.session_state.restore_msg)
@@ -313,15 +331,18 @@ if st.session_state.is_admin:
     col_bkp1, col_bkp2 = st.columns(2)
     with col_bkp1:
         if st.button("📥 一键备份所有数据（下载ZIP）"):
-            zip_data = create_backup_zip(data)
-            st.download_button(
-                label="下载备份文件",
-                data=zip_data,
-                file_name=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                mime="application/zip",
-                key="backup_download"
-            )
-            st.success("备份文件已生成，点击上方按钮下载")
+            try:
+                zip_data = create_backup_zip(data)
+                st.download_button(
+                    label="下载备份文件",
+                    data=zip_data,
+                    file_name=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    key="backup_download"
+                )
+                st.success("备份文件已生成，点击上方按钮下载")
+            except Exception as e:
+                st.error(f"生成备份失败：{str(e)}")
     with col_bkp2:
         uploaded_backup = st.file_uploader("📤 上传备份文件恢复", type="zip", key="restore_zip")
         if uploaded_backup is not None:
@@ -426,7 +447,7 @@ if st.session_state.is_admin:
                             s['scores'] = {'narration': nar, 'reflection': ref, 'identity': ide, 'intimacy': inti}
                             break
                     save_data(data)
-                    backup_to_github(data)  # 评分时缓存
+                    backup_to_github(data)
                     st.success("✅ 评分已保存")
                     st.rerun()
 
@@ -529,7 +550,7 @@ if st.session_state.user_id is None:
             else:
                 users[user_key] = hash_password(password)
                 save_data(data)
-                backup_to_github(data)  # 新注册时缓存
+                backup_to_github(data)
                 st.session_state.user_id = user_key
                 st.session_state.user_grade = grade
                 st.session_state.user_name = name
@@ -663,14 +684,14 @@ with st.form("submit_form"):
                     }
                     data['submissions'].append(new_sub)
                     save_data(data)
-                    backup_to_github(data)  # 提交时缓存
+                    backup_to_github(data)
                     log_activity('submit_success', user_key, work_title)
                     st.session_state.submit_success = True
                     st.rerun()
                 except Exception as e:
                     st.error(f"提交异常：{str(e)[:100]}")
 
-# 侧边栏（恢复与缓存状态）
+# 侧边栏
 st.sidebar.divider()
 st.sidebar.caption("🔄 启动恢复状态：")
 if 'restore_msg' in st.session_state and st.session_state.restore_msg:
