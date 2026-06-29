@@ -29,8 +29,71 @@ GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
+# ========== 新增：应用启动时自动从 GitHub 恢复数据 ==========
+def restore_from_github():
+    """如果本地数据文件不存在，从 GitHub 私有仓库恢复最新备份"""
+    try:
+        from github import Github
+        token = st.secrets.get("GITHUB_TOKEN")
+        repo_name = st.secrets.get("GITHUB_REPO")
+        if not token or not repo_name:
+            return  # 未配置 GitHub 备份，跳过
+
+        # 只在本地数据文件丢失时才恢复（例如休眠后被清空）
+        if os.path.exists(DATA_FILE):
+            return
+
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        contents = repo.get_contents("")
+
+        # 找到最新的 data.json 和 uploads.zip 备份
+        data_files = []
+        zip_files = []
+        for c in contents:
+            if c.name.startswith("backup_") and c.name.endswith("_data.json"):
+                data_files.append(c)
+            elif c.name.startswith("backup_") and c.name.endswith("_uploads.zip"):
+                zip_files.append(c)
+
+        if not data_files:
+            return  # 没有备份
+
+        # 按文件名排序（时间戳最新在前）
+        data_files.sort(key=lambda x: x.name, reverse=True)
+        zip_files.sort(key=lambda x: x.name, reverse=True)
+
+        # 恢复 data.json
+        latest_data = data_files[0]
+        data_content = base64.b64decode(latest_data.content).decode('utf-8')
+        new_data = json.loads(data_content)
+        if 'submissions' in new_data and 'users' in new_data:
+            with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(new_data, f, ensure_ascii=False, indent=2)
+            log_activity('github_restore_data', 'system', f'Restored {latest_data.name}')
+        else:
+            raise ValueError("data.json 格式不正确")
+
+        # 恢复 uploads.zip
+        if zip_files and not os.path.exists(UPLOAD_DIR):
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+        if zip_files:
+            latest_zip = zip_files[0]
+            zip_bytes = base64.b64decode(latest_zip.content)
+            with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+                zf.extractall(UPLOAD_DIR)
+            log_activity('github_restore_uploads', 'system', f'Restored {latest_zip.name}')
+
+    except Exception as e:
+        log_activity('github_restore_failed', 'system', str(e)[:200])
+
+# 在首次使用前调用恢复逻辑
+restore_from_github()
+# =====================================================
+
 # ---------- 病毒检测 ----------
 def scan_word_document(file_content, filename):
+    # ... 保持不变 ...
     errors = []
     if filename.lower().endswith('.docx'):
         if file_content[:4] != b'PK\x03\x04':
@@ -57,6 +120,7 @@ def scan_word_document(file_content, filename):
 
 # ---------- docx 文本提取（标准库） ----------
 def extract_text_from_docx(file_content):
+    # ... 保持不变 ...
     try:
         text_parts = []
         with zipfile.ZipFile(io.BytesIO(file_content), 'r') as zf:
@@ -77,6 +141,7 @@ def extract_text_from_docx(file_content):
         return f"⚠️ 解析错误：{str(e)[:100]}"
 
 def preview_docx(file_path):
+    # ... 保持不变 ...
     try:
         with open(file_path, 'rb') as f:
             content = f.read()
@@ -108,21 +173,19 @@ def load_data():
     return {'submissions': [], 'users': {}}
 
 def backup_to_github(data):
-    """将 data.json 和 uploads/ 打包上传到 GitHub 私有仓库，保留时间戳文件名"""
+    """将 data.json 和 uploads/ 打包上传到 GitHub 私有仓库"""
     try:
         from github import Github
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
-            raise ValueError("GitHub 备份未配置：缺少 GITHUB_TOKEN 或 GITHUB_REPO")
+            return
         
         g = Github(token)
         repo = g.get_repo(repo_name)
         
-        # 1. 准备 data.json 内容
         json_str = json.dumps(data, ensure_ascii=False, indent=2)
         
-        # 2. 打包 uploads 目录
         uploads_zip_bytes = None
         if os.path.exists(UPLOAD_DIR) and os.listdir(UPLOAD_DIR):
             zip_buffer = io.BytesIO()
@@ -135,17 +198,15 @@ def backup_to_github(data):
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        # 3. 上传 data.json
         data_filename = f"backup_{timestamp}_data.json"
         repo.create_file(data_filename, f"Backup data at {timestamp}", json_str)
         
-        # 4. 上传 uploads.zip（如果存在）
         if uploads_zip_bytes:
             content_b64 = base64.b64encode(uploads_zip_bytes).decode()
             zip_filename = f"backup_{timestamp}_uploads.zip"
             repo.create_file(zip_filename, f"Backup uploads at {timestamp}", content_b64)
         
-        # 5. 清理旧备份：每种类型最多保留 10 个
+        # 清理旧备份
         contents = repo.get_contents("")
         backup_files = [c for c in contents if c.name.startswith("backup_")]
         backup_files.sort(key=lambda x: x.name, reverse=True)
@@ -180,19 +241,17 @@ def save_data(data):
 
 def log_activity(action, user_id, detail=""):
     entry = {'time': datetime.now().isoformat(), 'action': action, 'user': user_id, 'detail': detail}
-    print(json.dumps(entry, ensure_ascii=False))  # 输出到 Streamlit Cloud 日志
+    print(json.dumps(entry, ensure_ascii=False))
 
 def get_user_key(grade, name):
     return f"{grade}_{name}".strip()
 
-# ---------- 备份/恢复函数 ----------
+# ---------- 备份/恢复函数（手动下载/上传） ----------
 def create_backup_zip(data):
-    """创建包含 data.json 和 uploads/ 的 zip 文件"""
+    # ... 保持不变 ...
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # 写入 data.json
         zf.writestr('data.json', json.dumps(data, ensure_ascii=False, indent=2))
-        # 写入 uploads 目录下所有文件
         if os.path.exists(UPLOAD_DIR):
             for root, dirs, files in os.walk(UPLOAD_DIR):
                 for file in files:
@@ -202,12 +261,10 @@ def create_backup_zip(data):
     return zip_buffer.getvalue()
 
 def restore_backup_zip(zip_bytes):
-    """从上传的 zip 文件恢复 data.json 和 uploads/"""
+    # ... 保持不变 ...
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
-        # 检查必需文件
         if 'data.json' not in zf.namelist():
             raise ValueError("备份文件中缺少 data.json")
-        # 解压 data.json 到临时变量验证格式
         with zf.open('data.json') as f:
             try:
                 new_data = json.load(f)
@@ -215,22 +272,18 @@ def restore_backup_zip(zip_bytes):
                     raise ValueError("data.json 格式不正确")
             except json.JSONDecodeError:
                 raise ValueError("data.json 不是有效的 JSON")
-        # 清空 uploads 目录
         if os.path.exists(UPLOAD_DIR):
             shutil.rmtree(UPLOAD_DIR)
         os.makedirs(UPLOAD_DIR, exist_ok=True)
-        # 解压所有文件（跳过 data.json）
         for member in zf.namelist():
             if member == 'data.json':
                 continue
-            # 安全检查：只解压到 uploads/ 下
             if not member.startswith('uploads/'):
                 continue
             target_path = os.path.join('/tmp', member)
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             with zf.open(member) as source, open(target_path, 'wb') as target:
                 shutil.copyfileobj(source, target)
-        # 写入 data.json
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
     return True
@@ -265,7 +318,7 @@ if st.session_state.is_admin:
     st.success("🔓 管理员模式")
     data = load_data()
 
-    # 备份与恢复区域
+    # 备份与恢复区域（手动操作）
     st.subheader("💾 数据备份与恢复")
     col_bkp1, col_bkp2 = st.columns(2)
     with col_bkp1:
@@ -361,7 +414,6 @@ if st.session_state.is_admin:
                 inti = st.number_input("Intimacy / Authenticity (0-5)", 0, 5, value=existing_scores.get('intimacy', 0))
                 mark = st.text_area("备注", value=sub.get('mark', ''))
                 if st.form_submit_button("保存评分"):
-                    # 重新加载数据防止覆盖
                     data = load_data()
                     for s in data['submissions']:
                         if s.get('file_path') == sub.get('file_path') and s.get('user_key') == sub.get('user_key'):
