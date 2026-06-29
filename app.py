@@ -19,13 +19,11 @@ UPLOAD_DIR = '/tmp/uploads'
 DATA_FILE = '/tmp/data.json'
 VIRUS_SCAN_DIR = '/tmp/virus_quarantine'
 
-# 从 Secrets 读取管理员密码（若未设置则默认 "password"）
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "password")
 ADMIN_PASSWORD_HASH = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
 
 GRADE_LIST = ['Grade 2027', 'Grade 2028', 'Grade 2029']
 
-# 创建必要目录
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(VIRUS_SCAN_DIR, exist_ok=True)
 
@@ -55,7 +53,7 @@ def scan_word_document(file_content, filename):
         errors.append("文件过大")
     return errors
 
-# ---------- docx 文本提取（标准库） ----------
+# ---------- docx 文本提取 ----------
 def extract_text_from_docx(file_content):
     try:
         text_parts = []
@@ -118,7 +116,7 @@ def get_user_key(grade, name):
 def restore_from_github():
     print("🔍 restore_from_github: 开始检查是否需要恢复数据...")
     try:
-        from github import Github
+        from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
@@ -130,7 +128,8 @@ def restore_from_github():
             return
 
         print("⚠️ 本地数据文件缺失，尝试从 GitHub 恢复...")
-        g = Github(token)
+        # 使用新式认证
+        g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
         contents = repo.get_contents("")
         data_files = []
@@ -172,10 +171,9 @@ def restore_from_github():
         log_activity('github_restore_failed', 'system', str(e)[:200])
 
 def backup_to_github(data):
-    """执行备份到 GitHub，并将结果消息存入 st.session_state.backup_msg"""
     print("🔄 backup_to_github: 开始备份...")
     try:
-        from github import Github
+        from github import Github, Auth
         token = st.secrets.get("GITHUB_TOKEN")
         repo_name = st.secrets.get("GITHUB_REPO")
         if not token or not repo_name:
@@ -184,7 +182,8 @@ def backup_to_github(data):
             st.session_state.backup_msg = msg
             return
 
-        g = Github(token)
+        # 使用新式认证
+        g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
         print(f"📡 已连接仓库: {repo_name}")
 
@@ -354,7 +353,7 @@ if st.session_state.is_admin:
                 except Exception as e:
                     st.error(f"❌ 恢复失败：{str(e)}")
 
-    # ----- 新增：手动备份到 GitHub -----
+    # 手动备份到 GitHub
     st.divider()
     st.subheader("☁️ 手动备份到 GitHub")
     if st.button("📤 立即备份到 GitHub 仓库"):
