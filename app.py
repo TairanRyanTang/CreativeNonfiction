@@ -75,10 +75,15 @@ def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
         except:
-            return {'submissions': [], 'users': {}}
-    return {'submissions': [], 'users': {}}
+            data = {'submissions': [], 'users': {}}
+    else:
+        data = {'submissions': [], 'users': {}}
+    # 确保 registrations 键存在
+    if 'registrations' not in data:
+        data['registrations'] = {}
+    return data
 
 def log_activity(action, user_id, detail=""):
     entry = {'time': datetime.now().isoformat(), 'action': action, 'user': user_id, 'detail': detail}
@@ -110,12 +115,14 @@ def restore_from_github():
         except:
             return "❌ 未找到缓存文件，无法自动恢复"
 
-        # 使用 decoded_content 获取原始 JSON 字节（避免双重编码）
         json_bytes = contents.decoded_content
         json_str = json_bytes.decode('utf-8')
         new_data = json.loads(json_str)
         if 'submissions' not in new_data or 'users' not in new_data:
             return "❌ 缓存文件格式不正确"
+        # 保证 registrations 存在
+        if 'registrations' not in new_data:
+            new_data['registrations'] = {}
 
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
@@ -138,10 +145,8 @@ def backup_to_github(data):
         g = Github(auth=Auth.Token(token))
         repo = g.get_repo(repo_name)
 
-        # 直接上传 JSON 字符串，PyGithub 会自动进行 base64 编码
         json_str = json.dumps(data, ensure_ascii=False, indent=2)
 
-        # 删除旧缓存
         try:
             old = repo.get_contents(CACHE_PATH)
             repo.delete_file(old.path, "删除旧缓存", old.sha)
@@ -169,6 +174,8 @@ def restore_backup_json(json_str):
     new_data = json.loads(json_str)
     if 'submissions' not in new_data or 'users' not in new_data:
         raise ValueError("JSON 格式不正确")
+    if 'registrations' not in new_data:
+        new_data['registrations'] = {}
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(new_data, f, ensure_ascii=False, indent=2)
     return True
@@ -181,6 +188,19 @@ if 'restore_msg' not in st.session_state:
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="比赛作品提交系统", page_icon="🔒")
 st.title("📝 比赛作品提交系统")
+
+# ========== 🌟 活动介绍（主页可见） ==========
+st.markdown("""
+## 🌟 活动介绍
+欢迎参加本次创意写作比赛！无论你是故事高手还是初次尝试，这里都是你展示才华的舞台。  
+
+为了帮助大家更好地创作，我们特别邀请两位资深导师举办线上讲座：
+
+- **Ms. Kiko's 讲座**：探讨如何写出引人入胜的故事开头，让你的作品从第一句就抓住读者。  
+- **Ms. Sabrina's 讲座**：分享提升语言表达力的技巧，让你的文字更生动、更有感染力。  
+
+登录后即可报名参加任意讲座（可多选），期待你的参与！
+""")
 
 # ---------- 会话初始化 ----------
 if 'user_id' not in st.session_state:
@@ -258,6 +278,23 @@ if st.session_state.is_admin:
         else:
             st.info(st.session_state.backup_msg)
     st.caption(f"最近缓存状态：{st.session_state.backup_msg}")
+
+    # 讲座报名统计（管理员可查看）
+    st.divider()
+    st.subheader("📋 讲座报名统计")
+    regs = data.get('registrations', {})
+    kiko_count = sum(1 for r in regs.values() if r.get("Ms. Kiko's"))
+    sabrina_count = sum(1 for r in regs.values() if r.get("Ms. Sabrina's"))
+    col_r1, col_r2 = st.columns(2)
+    col_r1.metric("Ms. Kiko's 报名人数", kiko_count)
+    col_r2.metric("Ms. Sabrina's 报名人数", sabrina_count)
+    if regs:
+        with st.expander("查看详细报名名单"):
+            reg_df = pd.DataFrame([
+                {"用户": k, "Ms. Kiko's": v.get("Ms. Kiko's", False), "Ms. Sabrina's": v.get("Ms. Sabrina's", False)}
+                for k, v in regs.items()
+            ])
+            st.dataframe(reg_df, use_container_width=True)
 
     st.divider()
 
@@ -377,6 +414,7 @@ if st.session_state.is_admin:
     if st.button("一键删除所有作品", disabled=not confirm):
         if confirm:
             data['submissions'] = []
+            # 可选：是否同时清空讲座报名？ 这里保留报名数据，只清空作品
             save_data(data)
             backup_to_github(data)
             log_activity('admin_delete_all', 'admin', 'All deleted')
@@ -422,6 +460,9 @@ if st.session_state.user_id is None:
                     st.error("密码错误")
             else:
                 users[user_key] = hash_password(password)
+                # 初始化 registrations 结构
+                if 'registrations' not in data:
+                    data['registrations'] = {}
                 save_data(data)
                 backup_to_github(data)
                 st.session_state.user_id = user_key
@@ -442,7 +483,36 @@ if st.button("🚪 退出登录"):
     st.session_state.submit_success = False
     st.rerun()
 
-# 提交成功页面
+# ========== 讲座报名（学生登录后） ==========
+st.subheader("📋 讲座报名")
+data = load_data()  # 获取最新数据
+user_key = st.session_state.user_id
+regs = data.setdefault('registrations', {})
+user_reg = regs.get(user_key, {})
+kiko = st.checkbox("Ms. Kiko's 讲座", value=user_reg.get("Ms. Kiko's", False))
+sabrina = st.checkbox("Ms. Sabrina's 讲座", value=user_reg.get("Ms. Sabrina's", False))
+
+if st.button("💾 保存报名信息"):
+    data = load_data()
+    if 'registrations' not in data:
+        data['registrations'] = {}
+    data['registrations'][user_key] = {"Ms. Kiko's": kiko, "Ms. Sabrina's": sabrina}
+    save_data(data)
+    backup_to_github(data)
+    st.success("报名信息已保存！")
+    st.rerun()
+
+# 显示当前报名状态
+if user_reg:
+    selected = [k for k, v in user_reg.items() if v]
+    if selected:
+        st.info(f"✅ 你已报名：{'、'.join(selected)}")
+    else:
+        st.info("ℹ️ 你尚未报名任何讲座")
+else:
+    st.info("ℹ️ 你尚未报名任何讲座")
+
+# ---------- 提交成功页面 ----------
 if st.session_state.submit_success:
     st.balloons()
     st.title("🎉 作品提交成功！")
@@ -469,6 +539,19 @@ if st.session_state.submit_success:
             st.info("📊 尚未评分，请耐心等待管理员评审")
     else:
         st.warning("未找到作品记录，请联系管理员")
+
+    # 显示讲座报名状态
+    st.subheader("📋 你的讲座报名")
+    regs = data.get('registrations', {})
+    user_reg = regs.get(user_key, {})
+    if user_reg:
+        selected = [k for k, v in user_reg.items() if v]
+        if selected:
+            st.write(f"✅ 已报名：{'、'.join(selected)}")
+        else:
+            st.write("ℹ️ 未报名任何讲座")
+    else:
+        st.write("ℹ️ 未报名任何讲座")
 
     if st.button("🔙 返回登录", type="primary"):
         st.session_state.user_id = None
