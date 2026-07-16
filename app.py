@@ -490,7 +490,7 @@ data = load_data()  # 获取最新数据
 user_key = st.session_state.user_id
 regs = data.setdefault('registrations', {})
 user_reg = regs.get(user_key, {})
-kiko = st.checkbox("Ms. Kiko's 讲座", value=user_reg.get("Ms. Kiko's", False))
+kiko = st.checkbox("Ms. Kiko's 讲座（https://meeting.tencent.com/dm/9rsqNuda4F1H, password: 0720）", value=user_reg.get("Ms. Kiko's", False))
 sabrina = st.checkbox("Ms. Sabrina's 讲座", value=user_reg.get("Ms. Sabrina's", False))
 
 if st.button("💾 保存报名信息"):
