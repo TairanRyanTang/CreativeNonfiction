@@ -418,7 +418,7 @@ if st.session_state.is_admin:
                     st.success("已标记为待复核")
                     st.rerun()
 
-            # ---------- 删除作品（新功能）----------
+            # ---------- 删除作品----------
             st.divider()
             st.subheader("🗑️ 删除该作品")
             delete_reason = st.text_input("删除理由（必填）", key="delete_reason")
@@ -513,16 +513,20 @@ if st.session_state.user_id is None:
 
 # 已登录学生
 # ---------- 检查删除通知 ----------
-data = load_data()  # 确保最新
+data = load_data()
 user_key = st.session_state.user_id
 deletions = data.get('deletions', {})
+
 if user_key in deletions:
     reason = deletions[user_key]['reason']
     st.error(f"Your essay has been deleted by the censor due to: {reason}")
-    # 清除通知，只显示一次
-    del data['deletions'][user_key]
-    save_data(data)
-    st.rerun()  # 刷新页面，消息消失
+    if st.button("✅ 我已了解"):
+        del data['deletions'][user_key]
+        save_data(data)
+        st.rerun()
+    st.stop()
+
+st.success(f"当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
 st.success(f"当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
