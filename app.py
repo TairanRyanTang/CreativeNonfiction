@@ -8,6 +8,7 @@ import io
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import base64
+import re
 
 # ---------- 安全配置 ----------
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
@@ -64,6 +65,14 @@ def extract_text_from_docx(file_content):
     except Exception as e:
         return f"⚠️ 解析错误：{str(e)[:100]}"
 
+# ---------- 中文含量检测 ----------
+def calculate_chinese_ratio(text):
+    if not text:
+        return 0.0
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    total_chars = len(text)
+    return chinese_chars / total_chars if total_chars > 0 else 0.0
+
 # ---------- 工具函数 ----------
 def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
@@ -77,12 +86,14 @@ def load_data():
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except:
-            data = {'submissions': [], 'users': {}}
+            data = {'submissions': [], 'users': {}, 'registrations': {}, 'deletions': {}}
     else:
-        data = {'submissions': [], 'users': {}}
-    # 确保 registrations 键存在
+        data = {'submissions': [], 'users': {}, 'registrations': {}, 'deletions': {}}
+    # 确保必要的键存在
     if 'registrations' not in data:
         data['registrations'] = {}
+    if 'deletions' not in data:
+        data['deletions'] = {}
     return data
 
 def log_activity(action, user_id, detail=""):
@@ -120,9 +131,11 @@ def restore_from_github():
         new_data = json.loads(json_str)
         if 'submissions' not in new_data or 'users' not in new_data:
             return "❌ 缓存文件格式不正确"
-        # 保证 registrations 存在
+        # 保证 registrations 和 deletions 存在
         if 'registrations' not in new_data:
             new_data['registrations'] = {}
+        if 'deletions' not in new_data:
+            new_data['deletions'] = {}
 
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
@@ -176,6 +189,8 @@ def restore_backup_json(json_str):
         raise ValueError("JSON 格式不正确")
     if 'registrations' not in new_data:
         new_data['registrations'] = {}
+    if 'deletions' not in new_data:
+        new_data['deletions'] = {}
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(new_data, f, ensure_ascii=False, indent=2)
     return True
@@ -344,7 +359,7 @@ if st.session_state.is_admin:
     else:
         st.info("暂无提交作品")
 
-    # 预览与评分
+    # 预览与评分（含删除功能）
     if st.session_state.preview_idx is not None:
         idx = st.session_state.preview_idx
         if idx < len(data['submissions']):
@@ -358,6 +373,7 @@ if st.session_state.is_admin:
             else:
                 st.warning("该作品无文本内容")
 
+            # 评分区域
             st.subheader("✍️ 评分")
             existing_scores = sub.get('scores', {})
             with st.form(key=f"score_{idx}"):
@@ -402,6 +418,28 @@ if st.session_state.is_admin:
                     st.success("已标记为待复核")
                     st.rerun()
 
+            # ---------- 删除作品（新功能）----------
+            st.divider()
+            st.subheader("🗑️ 删除该作品")
+            delete_reason = st.text_input("删除理由（必填）", key="delete_reason")
+            if st.button("⚠️ 确认删除此作品", key="confirm_delete"):
+                if not delete_reason.strip():
+                    st.error("必须填写删除理由")
+                else:
+                    data = load_data()
+                    # 从 submissions 中移除
+                    data['submissions'] = [s for s in data['submissions'] if s.get('user_key') != sub.get('user_key')]
+                    # 记录删除信息
+                    data['deletions'][sub['user_key']] = {
+                        "reason": delete_reason.strip(),
+                        "time": datetime.now().isoformat()
+                    }
+                    save_data(data)
+                    backup_to_github(data)
+                    st.success(f"✅ 已删除 {sub.get('student_name', '')} 的作品，用户下次登录将收到通知。")
+                    st.session_state.preview_idx = None
+                    st.rerun()
+
             if st.button("关闭预览"):
                 st.session_state.preview_idx = None
                 st.rerun()
@@ -415,7 +453,6 @@ if st.session_state.is_admin:
     if st.button("一键删除所有作品", disabled=not confirm):
         if confirm:
             data['submissions'] = []
-            # 可选：是否同时清空讲座报名？ 这里保留报名数据，只清空作品
             save_data(data)
             backup_to_github(data)
             log_activity('admin_delete_all', 'admin', 'All deleted')
@@ -475,6 +512,18 @@ if st.session_state.user_id is None:
     st.stop()
 
 # 已登录学生
+# ---------- 检查删除通知 ----------
+data = load_data()  # 确保最新
+user_key = st.session_state.user_id
+deletions = data.get('deletions', {})
+if user_key in deletions:
+    reason = deletions[user_key]['reason']
+    st.error(f"Your essay has been deleted by the censor due to: {reason}")
+    # 清除通知，只显示一次
+    del data['deletions'][user_key]
+    save_data(data)
+    st.rerun()  # 刷新页面，消息消失
+
 st.success(f"当前用户：{st.session_state.user_grade} {st.session_state.user_name}")
 
 if st.button("🚪 退出登录"):
@@ -490,8 +539,8 @@ data = load_data()  # 获取最新数据
 user_key = st.session_state.user_id
 regs = data.setdefault('registrations', {})
 user_reg = regs.get(user_key, {})
-kiko = st.checkbox("Ms. Kiko's 讲座（https://meeting.tencent.com/dm/9rsqNuda4F1H, password: 0720）", value=user_reg.get("Ms. Kiko's", False))
-sabrina = st.checkbox("Ms. Sabrina's 讲座", value=user_reg.get("Ms. Sabrina's", False))
+kiko = st.checkbox("Ms. Kiko's 讲座(https://meeting.tencent.com/dm/9rsqNuda4F1H, password: 0720)", value=user_reg.get("Ms. Kiko's", False))
+sabrina = st.checkbox("Ms. Sabrina's 讲座(https://meeting.tencent.com/dm/e4vqKMMT9vc8, passward: 0724)", value=user_reg.get("Ms. Sabrina's", False))
 
 if st.button("💾 保存报名信息"):
     data = load_data()
@@ -620,30 +669,35 @@ with st.form("submit_form"):
                 if extracted_text.startswith("⚠️"):
                     st.error(f"文本提取失败：{extracted_text}")
                 else:
-                    try:
-                        data = load_data()
-                        user_key = st.session_state.user_id
-                        for i, s in enumerate(data['submissions']):
-                            if s['user_key'] == user_key:
-                                data['submissions'].pop(i)
-                                break
-                        new_sub = {
-                            'user_key': user_key,
-                            'class_name': st.session_state.user_grade,
-                            'student_name': st.session_state.user_name,
-                            'work_title': work_title,
-                            'work_desc': work_desc,
-                            'content_text': extracted_text,
-                            'time': datetime.now().isoformat()
-                        }
-                        data['submissions'].append(new_sub)
-                        save_data(data)
-                        backup_to_github(data)
-                        log_activity('submit_success', user_key, work_title)
-                        st.session_state.submit_success = True
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"提交异常：{str(e)[:100]}")
+                    # 中文含量检测
+                    chinese_ratio = calculate_chinese_ratio(extracted_text)
+                    if chinese_ratio > 0.6:
+                        st.error(f"❌ 提交失败：作品中文含量为 {chinese_ratio:.1%}，超过60%限制。请提交英文作品。")
+                    else:
+                        try:
+                            data = load_data()
+                            user_key = st.session_state.user_id
+                            for i, s in enumerate(data['submissions']):
+                                if s['user_key'] == user_key:
+                                    data['submissions'].pop(i)
+                                    break
+                            new_sub = {
+                                'user_key': user_key,
+                                'class_name': st.session_state.user_grade,
+                                'student_name': st.session_state.user_name,
+                                'work_title': work_title,
+                                'work_desc': work_desc,
+                                'content_text': extracted_text,
+                                'time': datetime.now().isoformat()
+                            }
+                            data['submissions'].append(new_sub)
+                            save_data(data)
+                            backup_to_github(data)
+                            log_activity('submit_success', user_key, work_title)
+                            st.session_state.submit_success = True
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"提交异常：{str(e)[:100]}")
 
 # 侧边栏
 st.sidebar.divider()
@@ -666,3 +720,4 @@ st.sidebar.caption("- 恶意代码检测")
 st.sidebar.caption("- 文件大小限制 (20MB)")
 st.sidebar.caption("- 文档内容以文本形式存储")
 st.sidebar.caption("- 提交可覆盖，以最新为准")
+st.sidebar.caption("- 中文含量 >60% 自动拦截")
